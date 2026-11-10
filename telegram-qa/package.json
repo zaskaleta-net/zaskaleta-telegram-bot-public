@@ -1,0 +1,13 @@
+{
+  "name": "zaskaleta-telegram-qa",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/index.mjs && wrangler deploy --dry-run --config ./wrangler.toml --cwd . --outdir dist",
+    "deploy": "wrangler deploy --config ./wrangler.toml --cwd ."
+  },
+  "devDependencies": {
+    "wrangler": "4.130.0"
+  }
+}

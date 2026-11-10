@@ -1,0 +1,16 @@
+name = "zaskaleta-telegram-qa"
+main = "src/index.mjs"
+compatibility_date = "2026-09-30"
+workers_dev = true
+preview_urls = false
+
+[vars]
+STAGING_URL = "https://zaskaleta-info-telegram-staging.zaskaleta86.workers.dev"
+
+[[services]]
+binding = "STAGING"
+service = "zaskaleta-info-telegram-staging"
+
+[[routes]]
+pattern = "qa.zaskaleta.net"
+custom_domain = true
