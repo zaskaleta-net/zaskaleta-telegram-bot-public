@@ -1,0 +1,50 @@
+name: Telegram QA — Cloudflare Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      approval:
+        description: 'Type DEPLOY-TELEGRAM-QA'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-qa-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: github.repository == 'zaskaleta-net/zaskaleta-telegram-bot' && github.ref == 'refs/heads/main' && inputs.approval == 'DEPLOY-TELEGRAM-QA'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: telegram-staging
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Assert QA isolation
+        working-directory: telegram-qa
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$PWD" = "$GITHUB_WORKSPACE/telegram-qa"
+          grep -Fxq 'name = "zaskaleta-telegram-qa"' ./wrangler.toml
+          if grep -Eq 'zaskaleta-net|TIKTOK_|META_|YOUTUBE_|APP_ENV|ASSETS' ./wrangler.toml; then exit 1; fi
+      - name: Install and dry-run
+        working-directory: telegram-qa
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+          npm run check
+      - name: Deploy isolated QA Worker
+        working-directory: telegram-qa
+        run: npm run deploy

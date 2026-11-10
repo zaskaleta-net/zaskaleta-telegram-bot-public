@@ -1,0 +1,74 @@
+name: Telegram Staging — Guarded Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      approval:
+        description: 'Type DEPLOY-TELEGRAM-STAGING'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-staging-deploy
+  cancel-in-progress: true
+
+jobs:
+  verify-deploy:
+    if: github.repository == 'zaskaleta-net/zaskaleta-telegram-bot' && github.ref == 'refs/heads/main' && inputs.approval == 'DEPLOY-TELEGRAM-STAGING'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: telegram-staging
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      EXPECTED_TELEGRAM_INFO_TREE: 41454c5700b7c95d5f5acf2436231e66ab2237f4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate Cloudflare credentials presence
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+            echo "::error title=Cloudflare authentication missing::GitHub secret CLOUDFLARE_API_TOKEN is not available to environment telegram-staging"
+            exit 1
+          fi
+          if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+            echo "::error title=Cloudflare account missing::GitHub secret CLOUDFLARE_ACCOUNT_ID is not available to environment telegram-staging"
+            exit 1
+          fi
+          echo "CLOUDFLARE_AUTH_INPUTS_PRESENT"
+      - name: Enforce reviewed Telegram tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test "$(git rev-parse HEAD:telegram-info)" = "$EXPECTED_TELEGRAM_INFO_TREE"
+          echo "TELEGRAM_TREE_APPROVED $(git rev-parse HEAD:telegram-info)"
+      - name: Install dependencies
+        working-directory: telegram-info
+        run: npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+      - name: Full pre-deploy verification
+        working-directory: telegram-info
+        run: |
+          npm run check
+          node --test test/runtime-live-webhook-auth.test.mjs
+          npm test
+          npm run verify:baseline
+      - name: Guarded Cloudflare staging release
+        working-directory: telegram-info
+        env:
+          WORKERS_CI: '1'
+          WORKERS_CI_BRANCH: main
+        run: npm run release:staging
+      - name: Verify live staging contract
+        working-directory: telegram-info
+        run: npm run verify:staging

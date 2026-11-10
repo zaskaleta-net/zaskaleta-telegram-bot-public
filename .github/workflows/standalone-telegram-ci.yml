@@ -1,0 +1,96 @@
+name: Standalone Telegram Isolation CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+      - 'agent/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: standalone-telegram-isolation-ci-v3-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # Source-PR forensic gate verifies trusted origin/main, without secrets.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enforce Telegram-only root
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed='^(.git$|.github$|.gitignore$|AGENTS\.md$|README.md$|ISOLATION_MANIFEST.json$|ISOLATION_POLICY.md$|ops$|telegram-control$|telegram-info$|telegram-qa$)$'
+          near_miss='AGENTSXmd'
+          if printf '%s\n' "$near_miss" | grep -Eq "$allowed"; then
+            echo "ROOT_ALLOWLIST_NEAR_MISS_ACCEPTED"
+            printf '%s\n' "$near_miss"
+            exit 1
+          fi
+          bad="$(find . -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -Ev "$allowed" || true)"
+          if [ -n "$bad" ]; then
+            echo "FORBIDDEN_TOP_LEVEL_PATHS"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          test -f .github/qa/telegram-full-fuzz-x64.mjs
+          test -f .github/qa/telegram-statewide-runtime-audit-x64.mjs
+          if find .github/workflows -maxdepth 1 -type f ! -name 'telegram-*' ! -name 'standalone-telegram-ci.yml' | grep -q .; then
+            echo "NON_TELEGRAM_WORKFLOW_FOUND"
+            find .github/workflows -maxdepth 1 -type f ! -name 'telegram-*' ! -name 'standalone-telegram-ci.yml'
+            exit 1
+          fi
+          echo "TELEGRAM_ONLY_ROOT_PASS"
+
+      - name: Install Telegram dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix telegram-info install --ignore-scripts --no-audit --no-fund --package-lock=false
+          npm --prefix telegram-control install --ignore-scripts --no-audit --no-fund --package-lock=false
+          npm --prefix telegram-qa install --ignore-scripts --no-audit --no-fund --package-lock=false
+
+      - name: Telegram runtime syntax
+        run: npm --prefix telegram-info run check
+
+      - name: Telegram full suite
+        working-directory: telegram-info
+        run: npm test
+
+      - name: Telegram stable baseline
+        working-directory: telegram-info
+        run: npm run verify:baseline
+
+      - name: Statewide fuzz
+        run: node .github/qa/telegram-full-fuzz-x64.mjs
+
+      - name: Statewide runtime audit
+        run: node .github/qa/telegram-statewide-runtime-audit-x64.mjs
+
+      - name: Authoritative municipality audit
+        run: node telegram-info/scripts/audit-sh-municipality-routing.mjs
+
+      - name: Forensic P0 gate
+        run: node telegram-info/scripts/telegram-forensic-audit.mjs
+
+      - name: Telegram control validation
+        run: npm --prefix telegram-control run validate
+
+      - name: Telegram QA worker dry-run
+        run: npm --prefix telegram-qa run check

@@ -1,0 +1,67 @@
+name: Telegram Webhook — Guarded Host Migration
+
+# Moves the live webhook of @ZaskaletaInfoBot between the two reviewed hosts
+# of zaskaleta-info-telegram-staging (TG-RELEASE-044):
+#   MIGRATE-TELEGRAM-WEBHOOK   workers.dev -> https://bot.zaskaleta.net
+#   ROLLBACK-TELEGRAM-WEBHOOK  https://bot.zaskaleta.net -> workers.dev
+# register-webhook.mjs refuses any other current webhook, proves the target
+# host is healthy, fail-closed and holding the configured secret before it
+# calls setWebhook, keeps pending updates and verifies the result.
+
+on:
+  workflow_dispatch:
+    inputs:
+      approval:
+        description: 'Type MIGRATE-TELEGRAM-WEBHOOK or ROLLBACK-TELEGRAM-WEBHOOK'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Shared with the secret rotation so two webhook mutations never overlap.
+concurrency:
+  group: telegram-webhook-secret-rotation
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    if: github.repository == 'zaskaleta-net/zaskaleta-telegram-bot' && github.ref == 'refs/heads/main' && (inputs.approval == 'MIGRATE-TELEGRAM-WEBHOOK' || inputs.approval == 'ROLLBACK-TELEGRAM-WEBHOOK')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: telegram-registration
+    env:
+      EXPECTED_TELEGRAM_INFO_TREE: 41454c5700b7c95d5f5acf2436231e66ab2237f4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Enforce reviewed Telegram tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test "$(git rev-parse HEAD:telegram-info)" = "$EXPECTED_TELEGRAM_INFO_TREE"
+          echo "TELEGRAM_TREE_APPROVED $(git rev-parse HEAD:telegram-info)"
+      - name: Registration contract tests
+        working-directory: telegram-info
+        run: node --test test/registration.test.mjs
+      - name: Move webhook and verify
+        working-directory: telegram-info
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          APPROVAL_INPUT: ${{ inputs.approval }}
+        run: |
+          set -euo pipefail
+          case "$APPROVAL_INPUT" in
+            MIGRATE-TELEGRAM-WEBHOOK) export TELEGRAM_REGISTRATION_APPROVAL=MIGRATE-STAGING ;;
+            ROLLBACK-TELEGRAM-WEBHOOK) export TELEGRAM_REGISTRATION_APPROVAL=ROLLBACK-STAGING ;;
+            *) echo "::error::Unknown approval"; exit 1 ;;
+          esac
+          node scripts/register-webhook.mjs

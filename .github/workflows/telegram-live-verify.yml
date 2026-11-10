@@ -1,0 +1,92 @@
+name: Telegram Live — Verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-live-verify
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.repository == 'zaskaleta-net/zaskaleta-telegram-bot' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: telegram-registration
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+      EXPECTED_TELEGRAM_INFO_TREE: 41454c5700b7c95d5f5acf2436231e66ab2237f4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Enforce reviewed Telegram tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test "$(git rev-parse HEAD:telegram-info)" = "$EXPECTED_TELEGRAM_INFO_TREE"
+          echo "TELEGRAM_LIVE_TREE_APPROVED $(git rev-parse HEAD:telegram-info)"
+      - name: Telegram forensic P0 gate
+        run: node telegram-info/scripts/telegram-forensic-audit.mjs
+      - name: Verify live Telegram bot and staging webhook
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const token = String(process.env.TELEGRAM_BOT_TOKEN || '');
+          const secret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '');
+          assert.match(token, /^[0-9]{5,20}:[A-Za-z0-9_-]{30,}$/);
+          assert.match(secret, /^[A-Za-z0-9_-]{32,256}$/);
+          const STAGING = 'https://bot.zaskaleta.net';
+          const WEBHOOK = STAGING + '/telegram/stateless';
+          async function json(url, options = {}) {
+            const response = await fetch(url, { ...options, redirect:'error', signal:AbortSignal.timeout(15000) });
+            const text = await response.text();
+            let body = null; try { body = JSON.parse(text); } catch {}
+            return { response, body };
+          }
+          const health = await json(STAGING + '/health');
+          assert.equal(health.response.status, 200);
+          assert.equal(health.body?.ok, true);
+          assert.equal(health.body?.delivery, true);
+          assert.match(String(health.body?.versionId || ''), /^[0-9a-f-]{36}$/i);
+          const invalid = await json(WEBHOOK, {
+            method:'POST',
+            headers:{'content-type':'application/json','x-telegram-bot-api-secret-token':'invalid-live-probe-secret'},
+            body:'{}'
+          });
+          assert.equal(invalid.response.status, 401);
+          const me = await json('https://api.telegram.org/bot' + token + '/getMe');
+          assert.equal(me.response.status, 200);
+          assert.equal(me.body?.ok, true);
+          assert.equal(me.body?.result?.username, 'ZaskaletaInfoBot');
+          const info = await json('https://api.telegram.org/bot' + token + '/getWebhookInfo');
+          assert.equal(info.response.status, 200);
+          assert.equal(info.body?.ok, true);
+          assert.equal(info.body?.result?.url, WEBHOOK);
+          const auth = await json(WEBHOOK, {
+            method:'POST',
+            headers:{'content-type':'application/json','x-telegram-bot-api-secret-token':secret},
+            body:'{}'
+          });
+          assert.equal(auth.response.status, 200);
+          assert.equal(auth.body?.ok, true);
+          console.log('TELEGRAM_LIVE_OK ' + JSON.stringify({
+            activeVersionId:health.body.versionId,
+            botUsername:me.body.result.username,
+            webhookConfigured:true,
+            invalidSecretFailClosed401:true,
+            authenticatedWebhookProbe:true,
+            pendingUpdateCount:Number(info.body.result.pending_update_count || 0)
+          }));
+          NODE
