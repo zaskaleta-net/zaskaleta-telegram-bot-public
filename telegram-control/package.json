@@ -1,0 +1,13 @@
+{
+  "name": "zaskaleta-cloudflare-control",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/worker.mjs",
+    "test": "node --test test/*.test.mjs",
+    "validate": "npm run check && npm test"
+  },
+  "devDependencies": {
+    "wrangler": "4.130.0"
+  }
+}

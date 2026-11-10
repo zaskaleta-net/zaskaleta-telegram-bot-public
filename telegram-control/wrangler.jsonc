@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zaskaleta-cloudflare-control",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-09-25",
+  "workers_dev": true,
+  "vars": {
+    "TELEGRAM_WORKER_URL": "https://zaskaleta-info-telegram-staging.zaskaleta86.workers.dev"
+  }
+}
