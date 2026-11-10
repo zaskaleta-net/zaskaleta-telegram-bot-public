@@ -1,0 +1,35 @@
+task_id: TG-XXX
+owner: runtime-agent | housing-agent | qa-agent | release-agent | security-reviewer
+reviewer: <different role from owner>
+severity: P0 | P1 | P2 | P3
+type: runtime | housing | qa | release | security
+
+goal: >
+  <concrete observable outcome>
+
+triage:
+  symptom: <observed symptom>
+  expected: <expected behavior>
+  actual: <actual behavior>
+  likely_root_cause: <working hypothesis>
+  affected_flow: <flow or component>
+  risk: <blast radius / risk>
+
+scope:
+  allowed_paths:
+    - <explicit path>
+  forbidden_paths:
+    - <explicit path>
+
+acceptance:
+  - <observable criterion>
+  - <regression criterion when applicable>
+
+required_checks:
+  - syntax
+  - targeted_tests
+  - full_suite_if_runtime_changed
+
+branch: agent/<role>/<task-id>-<slug>
+production_access: false
+merge_access: false
