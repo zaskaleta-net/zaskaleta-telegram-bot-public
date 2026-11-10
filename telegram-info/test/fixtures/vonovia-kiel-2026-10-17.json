@@ -1,0 +1,74 @@
+{
+ "paging": {
+  "info": {
+   "count": 33,
+   "limit": 15
+  }
+ },
+ "results": [
+  {
+   "wrk_id": "1355030001",
+   "titel": "Schöne Wohnung: großzügige 3-Zimmer-Wohnung",
+   "strasse": "Lechweg 95",
+   "plz": "24146",
+   "ort": "Kiel OT Elmschenhagen",
+   "preis": 825.27,
+   "groesse": 84.73,
+   "anzahl_zimmer": 3,
+   "preview_img_url": "https://cdn.expose.vonovia.de/VNA-77f18881-053b-4939-8dc0-f49a7d772a3c.jpg?width=324&crop=4:3",
+   "slug": "schoene-wohnung-grosszuegige-3-zimmer-wohnung-81-1355030001",
+   "vermarktungsart_kauf": "0",
+   "vermarktungsart_miete": "1",
+   "lat": 54.2876897,
+   "lng": 10.190247
+  },
+  {
+   "wrk_id": "0855750069",
+   "titel": "Schöne 1,5 Zi.-Whg. für Senioren",
+   "strasse": "Bebelplatz 3",
+   "plz": "24146",
+   "ort": "Kiel OT Elmschenhagen",
+   "preis": 348.27,
+   "groesse": 42.13,
+   "anzahl_zimmer": 1,
+   "preview_img_url": "https://cdn.expose.vonovia.de/DA00C64200000CEC.jpg?width=324&crop=4:3",
+   "slug": "schoene-15-zi-whg-fuer-senioren-81-0855750069",
+   "vermarktungsart_kauf": "0",
+   "vermarktungsart_miete": "1",
+   "lat": 54.2945067,
+   "lng": 10.1845022
+  },
+  {
+   "wrk_id": "0851760001",
+   "titel": " Ansprechendes 1,5-Zimmer-Appartment mit Balkon",
+   "strasse": "Ostring 91",
+   "plz": "24143",
+   "ort": "Kiel OT Gaarden-Ost",
+   "preis": 430,
+   "groesse": 41.27,
+   "anzahl_zimmer": 1,
+   "preview_img_url": "https://cdn.expose.vonovia.de/VNA-044811eb-67ea-44f4-9321-38f8eab27021.jpg?width=324&crop=4:3",
+   "slug": "ansprechendes-15-zimmer-appartment-mit-balkon-81-0851760001",
+   "vermarktungsart_kauf": "0",
+   "vermarktungsart_miete": "1",
+   "lat": 54.3020639,
+   "lng": 10.1443314
+  },
+  {
+   "wrk_id": "0852000001",
+   "titel": "Frisch modernisiert",
+   "strasse": "Ostring 126",
+   "plz": "24143",
+   "ort": "Kiel OT Gaarden-Ost",
+   "preis": 401.91,
+   "groesse": 38.35,
+   "anzahl_zimmer": 2,
+   "preview_img_url": "https://cdn.expose.vonovia.de/VNA-5f4d87c2-a7b5-4a1d-b3dd-92d6b56223bc.jpg?width=324&crop=4:3",
+   "slug": "frisch-modernisiert-81-0852000001",
+   "vermarktungsart_kauf": "0",
+   "vermarktungsart_miete": "1",
+   "lat": 54.3020639,
+   "lng": 10.1443314
+  }
+ ]
+}
