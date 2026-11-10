@@ -1,0 +1,28 @@
+{
+  "schema": 3,
+  "purpose": "Standalone private repository for @ZaskaletaInfoBot",
+  "repository": "zaskaleta-net/zaskaleta-telegram-bot",
+  "default_branch": "main",
+  "active_entrypoint": "telegram-info/src/worker-entry-pilot-v21.mjs",
+  "telegram_info_tree": "bd32e9c4e01113d2d7734055f94425b2d5ee1e08",
+  "included_roots": [
+    "telegram-info/",
+    "telegram-control/",
+    "telegram-qa/",
+    "ops/",
+    ".github/qa/",
+    ".github/workflows/"
+  ],
+  "permanent_workflows": [
+    "standalone-telegram-ci.yml",
+    "telegram-staging-deploy.yml",
+    "telegram-live-verify.yml",
+    "telegram-qa-deploy.yml"
+  ],
+  "provenance": {
+    "source_repository": "sergokharkov/zaskaleta-media",
+    "source_branch": "feat/telegram-durable-pilot",
+    "source_commit": "d3ff4450ce3fc4663813c44f9fca2c56c4aa0637"
+  },
+  "invariant": "Repository working tree and CI/CD are Telegram-only; deploy workflows are manual-only."
+}
