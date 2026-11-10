@@ -26,6 +26,12 @@ const repo = process.env.FAKE_REPO_ROOT;
 const pin = process.env.FAKE_PIN;
 const mode = process.env.FAKE_MODE || '';
 const name = args[args.length - 1] || '';
+const publicRun = process.env.GITHUB_REPOSITORY === 'zaskaleta-net/zaskaleta-telegram-bot-public';
+const baseline = publicRun ? JSON.parse(fs.readFileSync(path.join(repo,'ops/public-source-baseline.json'),'utf8')) : null;
+if (args[0] === 'rev-list') {
+  process.stdout.write((process.env.FAKE_PARENTS || 'f'.repeat(40) + ' ' + (process.env.FAKE_MAIN_SHA || 'c'.repeat(40)) + ' ' + 'd'.repeat(40)) + '\n');
+  process.exit(0);
+}
 const paths = [
   '.github/workflows/telegram-staging-deploy.yml',
   '.github/workflows/telegram-live-verify.yml',
@@ -43,15 +49,15 @@ if (args[0] === 'rev-parse') {
   }
   if (name === 'refs/remotes/origin/main') {
     if (mode === 'missing-main') fail();
-    emit('c'.repeat(40));
+    emit(process.env.FAKE_MAIN_SHA || 'c'.repeat(40));
   }
   for (const candidate of paths) {
     if (name === 'HEAD:' + candidate) {
-      emit(mode === 'changed-protected-file' && candidate === paths[0] ? 'b'.repeat(40) : 'a'.repeat(40));
+      emit(mode === 'changed-protected-file' && candidate === paths[0] ? 'b'.repeat(40) : (publicRun ? baseline.guardedWorkflows[candidate] : 'a'.repeat(40)));
     }
     if (name === 'refs/remotes/origin/main:' + candidate) {
       if (mode === 'missing-main') fail();
-      emit('a'.repeat(40));
+      emit(publicRun ? baseline.guardedWorkflows[candidate] : 'a'.repeat(40));
     }
   }
 }
@@ -60,6 +66,13 @@ if (args[0] === 'show'
   const fromMain = name.startsWith('refs/remotes/origin/main:');
   if (fromMain && mode === 'missing-main') fail();
   const candidate = name.slice(fromMain ? 'refs/remotes/origin/main:'.length : 'HEAD:'.length);
+  if (candidate === 'ops/public-source-baseline.json' && publicRun) {
+    if (mode === 'missing-baseline' || (fromMain && mode === 'missing-main-baseline')) fail();
+    let raw = fs.readFileSync(path.join(repo,candidate),'utf8');
+    if (mode === 'dirty-baseline' && !fromMain) raw += ' ';
+    if (mode === 'invalid-baseline') raw = raw.replace(baseline.repository,'attacker/fork');
+    process.stdout.write(raw); process.exit(0);
+  }
   if (!paths.includes(candidate)) fail();
   let source = fs.readFileSync(path.join(repo, candidate), 'utf8');
   if (fromMain && mode === 'divergent-pin' && candidate === paths[1]) {
@@ -222,4 +235,73 @@ test('source PR refuses an event with conflicting PR number', () => {
   failClosed(runAudit({
     kind: 'pr', event: makeEvent('main', { number: 999 })
   }), 'GUARDED_TREE_CONTEXT_INVALID');
+});
+
+const PUBLIC_REPO = REPO + '-public';
+const publicPin = () => JSON.parse(fs.readFileSync(path.join(ROOT,'ops/public-source-baseline.json'),'utf8')).telegramInfoTree;
+function publicAudit(options = {}) {
+  const pr = options.kind === 'pr';
+  const event = pr ? makeEvent() : { repository: { full_name: PUBLIC_REPO }, ref: 'refs/heads/main', after: HEAD };
+  if (pr) {
+    event.repository.full_name = PUBLIC_REPO;
+    event.pull_request.base.repo.full_name = PUBLIC_REPO;
+    event.pull_request.head.repo.full_name = PUBLIC_REPO;
+    if (options.bootstrap) event.pull_request.base.sha = 'd2dd4c57ffddf4a0ef5848dc0131ae524d91fa32';
+  }
+  options.mutateEvent?.(event);
+  return runAudit({ ...options, event, headTree: options.headTree || publicPin(), mainTree: options.mainTree || publicPin(),
+    env: { GITHUB_REPOSITORY: PUBLIC_REPO, GITHUB_EVENT_NAME: pr ? 'pull_request' : 'push',
+      ...(options.bootstrap ? { FAKE_MAIN_SHA: 'd2dd4c57ffddf4a0ef5848dc0131ae524d91fa32' } : {}), ...options.env } });
+}
+test('public main push validates source without release authority', () => {
+  const run = publicAudit(); pass(run);
+  assert.match(run.stdout, /PUBLIC_SOURCE_MAIN_READ_ONLY/u);
+  assert.doesNotMatch(run.stdout, /"forensicContext":"PROTECTED_MAIN"/u);
+});
+test('public same-repository PR validates source', () => {
+  const run = publicAudit({kind:'pr'}); pass(run);
+  assert.match(run.stdout, /PUBLIC_SOURCE_PR_READ_ONLY/u);
+});
+test('public initial import bootstrap accepts only exact reviewed tree', () => {
+  pass(publicAudit({kind:'pr',bootstrap:true,mainTree:'36b6fbbd87b71649dd4ff6536249350155135ed6',mode:'missing-main-baseline'}));
+  failClosed(publicAudit({kind:'pr',bootstrap:true,mainTree:BASE}), 'PUBLIC_SOURCE_BASELINE_INVALID');
+});
+for (const mode of ['missing-baseline','dirty-baseline','invalid-baseline','changed-protected-file']) {
+  test('public main rejects ' + mode, () => failClosed(publicAudit({mode}), 'PUBLIC_SOURCE_BASELINE_INVALID'));
+}
+for (const mode of ['missing-main-baseline','missing-main']) {
+  test('public PR rejects ' + mode, () => {
+    const run = publicAudit({kind:'pr',mode});
+    failClosed(run, mode === 'missing-main' ? 'GUARDED_TREE_CONTEXT_INVALID' : 'PUBLIC_SOURCE_BASELINE_INVALID');
+  });
+}
+test('public source rejects stale proposed or trusted source pins', () => {
+  failClosed(publicAudit({headTree:BASE}), 'PUBLIC_SOURCE_BASELINE_INVALID');
+  failClosed(publicAudit({kind:'pr',mainTree:BASE}), 'PUBLIC_SOURCE_BASELINE_INVALID');
+});
+for (const [label, env] of Object.entries({
+  dispatch:{GITHUB_EVENT_NAME:'workflow_dispatch'}, target:{GITHUB_EVENT_NAME:'pull_request_target'},
+  unknownRepo:{GITHUB_REPOSITORY:'attacker/fork'}, missingRunner:{GITHUB_ACTIONS:'false'},
+  mismatchedSha:{GITHUB_SHA:BASE}, wrongRef:{GITHUB_REF:'refs/heads/other'},
+  wrongParents:{FAKE_PARENTS:HEAD+' '+PR_HEAD+' '+BASE}, wrongNumber:{GITHUB_REF:'refs/pull/999/merge'},
+  wrongBase:{GITHUB_BASE_REF:'other'}, wrongHead:{GITHUB_HEAD_REF:'other'}
+})) {
+  test('public PR rejects ' + label, () => failClosed(publicAudit({kind:'pr',env}), 'GUARDED_TREE_CONTEXT_INVALID'));
+}
+for (const [label, mutateEvent] of Object.entries({
+  repo:e=>{e.repository.full_name='attacker/fork';},
+  fork:e=>{e.pull_request.head.repo.full_name='attacker/fork';},
+  baseRepo:e=>{e.pull_request.base.repo.full_name='attacker/fork';},
+  baseSha:e=>{e.pull_request.base.sha=PR_HEAD;},
+  headSha:e=>{e.pull_request.head.sha='bad';},
+  number:e=>{e.pull_request.number=999;}
+})) {
+  test('public PR rejects event ' + label, () => failClosed(publicAudit({kind:'pr',mutateEvent}), 'GUARDED_TREE_CONTEXT_INVALID'));
+}
+test('public push rejects mismatched event ref and after SHA', () => {
+  failClosed(publicAudit({mutateEvent:e=>{e.ref='refs/heads/other';}}), 'GUARDED_TREE_CONTEXT_INVALID');
+  failClosed(publicAudit({mutateEvent:e=>{e.after=BASE;}}), 'GUARDED_TREE_CONTEXT_INVALID');
+});
+test('public source rejects dirty protected workflow', () => {
+  failClosed(publicAudit({mode:'uncommitted-workflow'}), 'GUARDED_WORKFLOW_CHECKOUT_MODIFIED');
 });
