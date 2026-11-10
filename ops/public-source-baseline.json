@@ -1,11 +1,11 @@
 {
-  "version": 1,
+  "version": 2,
   "repository": "zaskaleta-net/zaskaleta-telegram-bot-public",
-  "telegramInfoTree": "c7e2d2b8a069a13f42ccc5cfbc1377f54358b5b4",
+  "telegramInfoTree": "3090a7008c67b275fc13a4c320b5c254e90cd7ca",
   "guardedWorkflows": {
-    ".github/workflows/telegram-staging-deploy.yml": "c44c1a53ba9bc2d0066510db01dc517ebe2cdea6",
-    ".github/workflows/telegram-live-verify.yml": "f449c6d834fed8275e97c3bac730962b6e345fb3",
-    ".github/workflows/telegram-webhook-migrate.yml": "42399516ad952de6cf25d42807e1ffda9099d03a",
-    ".github/workflows/telegram-webhook-secret-rotate.yml": "21f0d15b76b06a7a736d614480b3a95473aaa275"
+    ".github/workflows/telegram-staging-deploy.yml": "519d84588ebd8b79afa4195ce262e8707ca35a04",
+    ".github/workflows/telegram-live-verify.yml": "68c44aafde976dc401da89609ef4aa1df5a09e06",
+    ".github/workflows/telegram-webhook-migrate.yml": "af603edd6709aaaece742205ae255b3a5639b171",
+    ".github/workflows/telegram-webhook-secret-rotate.yml": "cebe2b6c8675c0923261ee49218780bf164c0d83"
   }
 }
