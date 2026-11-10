@@ -1,132 +1,131 @@
-// TG-RELEASE-118: the guarded webhook-secret rotation must keep every update
-// type the Worker needs. The rotation script embedded in the workflow is run
-// here against a mocked fetch only; no Telegram or Cloudflare call is made.
+// Coordinated rotation executes the actual protected inline script with mocked network only.
+import fs from 'node:fs';
+import vm from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+const raw=fs.readFileSync(new URL('../../.github/workflows/telegram-webhook-secret-rotate.yml',import.meta.url),'utf8');
+const code=raw.split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0].split('\n').map(x=>x.slice(10)).join('\n');
 
-const workflowPath = new URL('../../.github/workflows/telegram-webhook-secret-rotate.yml', import.meta.url);
-const workflow = readFileSync(workflowPath, 'utf8');
+const old='ac5e41ae-c9ae-4926-af0f-557b53708b08', fresh='bc5e41ae-c9ae-4926-af0f-557b53708b08', other='cc5e41ae-c9ae-4926-af0f-557b53708b08';
+const secrets={CLOUDFLARE_API_TOKEN:'Mock_CF_'.repeat(6),CLOUDFLARE_ACCOUNT_ID:'a'.repeat(32),TELEGRAM_BOT_TOKEN:'123456789:'+ 'Mock_TG_'.repeat(5),TELEGRAM_WEBHOOK_SECRET:'Mock_WEBHOOK_'.repeat(4),EXPECTED_ACTIVE_VERSION:old};
+const poison=Object.values(secrets).join(' ');
+async function run(config={}) {
+ const env={...secrets,...config.env}; const calls=[],logs=[],timeouts=[]; let active=config.recovery?fresh:old, installed=!!config.recovery, put=0, set=0, deploymentCalls=0, validProbes=0, clock=0;
+ const proc={env,exitCode:0};
+ const info={url:'https://bot.zaskaleta.net/telegram/stateless',has_custom_certificate:false,pending_update_count:8,max_connections:7,allowed_updates:['message','callback_query','chat_join_request'],...config.info};
+ const FakeDate=class extends Date {static now(){return clock;}};
+ const context=vm.createContext({Date:FakeDate,process:proc,console:{log:x=>logs.push(x),error:x=>logs.push(x)},setTimeout:(fn,delay)=>{clock+=delay;fn();},AbortSignal:{timeout:ms=>{timeouts.push(ms);return 'mock-signal';}},fetch:async(url,opt)=>{
+  clock+=config.requestTime||0;
+  assert.equal(opt.redirect,'error');assert.equal(opt.signal,'mock-signal');
+  const u=new URL(url);assert.ok(['api.cloudflare.com','api.telegram.org','bot.zaskaleta.net'].includes(u.hostname));
+  const method=opt.method||'GET';calls.push({url,method,opt});
+  if(u.hostname==='api.cloudflare.com') assert.equal(opt.headers.Authorization,'Bearer '+secrets.CLOUDFLARE_API_TOKEN);
+  else assert.equal(opt.headers?.Authorization,undefined);
+  let body,status=200;
+  if(u.pathname.endsWith('/getMe')) body={ok:true,result:{username:config.wrongBot?'OtherBot':'ZaskaletaInfoBot',is_bot:true}};
+  else if(u.pathname.endsWith('/getWebhookInfo')) body={ok:true,result:{...info,...(set&&config.finalInfo?config.finalInfo:{})}};
+  else if(u.pathname.endsWith('/deployments')) {
+   deploymentCalls++;if(config.drift&&deploymentCalls===2)active=other;
+   body={success:true,result:{deployments:[{id:'11111111-1111-1111-1111-111111111111',strategy:'percentage',created_on:'2026-11-10T12:00:00Z',versions:[{version_id:active,percentage:100}]}]}};
+   if(config.badDeployment)body.result.deployments[0].versions.push({version_id:other,percentage:0});
+   if(config.badDate)body.result.deployments[0].created_on='bad';
+  } else if(u.pathname.endsWith('/versions')) {assert.equal(u.search,'?page=1&per_page=1');body={success:true,result:{items:[{id:config.newerUpload?other:active,number:3}]}};}
+  else if(u.pathname.endsWith('/health')) body={ok:true,delivery:!config.disabled,versionId:config.badHealth?other:active};
+  else if(u.pathname.endsWith('/secrets')) {
+   assert.equal(method,'PUT');assert.deepEqual(JSON.parse(opt.body),{name:'TELEGRAM_WEBHOOK_SECRET',text:secrets.TELEGRAM_WEBHOOK_SECRET,type:'secret_text'});put++;
+   if(!config.cfRejected){active=fresh;installed=true;}
+   if(config.cfTimeout)throw new Error(poison);
+   body=config.cfRejected?{success:false,errors:[{message:poison}]}:{success:true,result:{name:'TELEGRAM_WEBHOOK_SECRET',type:'secret_text'}};
+  } else if(u.pathname.endsWith('/setWebhook')) {
+   set++;assert.equal(method,'POST');const payload=JSON.parse(opt.body);assert.deepEqual(payload,{url:info.url,secret_token:secrets.TELEGRAM_WEBHOOK_SECRET,max_connections:info.max_connections,...(info.allowed_updates===undefined?{}:{allowed_updates:info.allowed_updates}),drop_pending_updates:false});
+   assert.equal(installed,true);
+   if(config.tgTimeout===true || (config.tgTimeout===1&&set===1))throw new Error(poison);
+   body={ok:true,result:!config.tgFalse};
+  } else if(u.pathname==='/telegram/stateless') {
+   assert.equal(method,'POST');assert.equal(opt.body,'{}');
+   const valid=opt.headers['X-Telegram-Bot-Api-Secret-Token']===secrets.TELEGRAM_WEBHOOK_SECRET;
+   if(valid&&put)validProbes++;
+   status=valid&&installed&&validProbes>(config.propagationFailures||0)?200:401;
+   if(valid&&installed&&!put)status=200;body={ok:status===200};
+   if(config.badInvalid&&!valid)status=200;
+   if(config.probeError&&valid){status=500;body={error:poison};}
+  } else assert.fail('Unexpected route '+u.pathname);
+  if(config.failRoute&&u.pathname.endsWith(config.failRoute)){status=403;body={error:poison};}
+  if(config.throwRoute&&u.pathname.endsWith(config.throwRoute))throw new Error(poison);
+  return {status,json:async()=>{if(config.badJson&&u.pathname.endsWith(config.badJson))throw new Error(poison);return body;}};
+ }});
+ await vm.runInContext('(async()=>{'+code+'})()',context);
+ const output=logs.join('\n'); for(const value of Object.values(secrets))assert.ok(!output.includes(value),'redacted '+value.slice(0,5));
+ assert.ok(timeouts.every(x=>x>0&&x<=15000));
+ return {exit:proc.exitCode,output,calls,put,set,installed};
+}
+
+import { readFileSync } from 'node:fs';
+const workflow = raw;
 const REQUIRED_UPDATES = ['message', 'callback_query', 'chat_join_request'];
 const WEBHOOK_URL = 'https://bot.zaskaleta.net/telegram/stateless';
-const token = '123456789:' + 'A'.repeat(35);
-const secret = 'B'.repeat(48);
 
-function rotationScript() {
-  const step = workflow.indexOf('- name: Rotate Telegram webhook secret and verify');
-  assert.ok(step > 0, 'rotation step is present');
-  const open = "node --input-type=module <<'NODE'\n";
-  const start = workflow.indexOf(open, step);
-  assert.ok(start > step, 'rotation step runs an inline Node module');
-  const end = workflow.indexOf('\n          NODE', start + open.length);
-  assert.ok(end > start, 'inline Node module is terminated');
-  const body = workflow.slice(start + open.length, end).split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
-  const importLine = "import assert from 'node:assert/strict';";
-  assert.ok(body.includes(importLine));
-  return body.replace(importLine, '');
-}
-
-const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
-
-async function runRotation({ reportedUpdates = null, failSetAttempts = 0, unauthStatus = 401 } = {}) {
-  const calls = [];
-  const logs = [];
-  let allowed = [];
-  let setAttempts = 0;
-  const fetchImpl = async (url, options = {}) => {
-    assert.equal(options.redirect, 'error');
-    assert.ok(options.signal, 'every request is time-bounded');
-    const method = url.startsWith('https://api.telegram.org/') ? url.split('/').pop() : 'probe';
-    calls.push({ method, url, options, body: options.body ? JSON.parse(options.body) : null });
-    if (method === 'setWebhook') {
-      setAttempts += 1;
-      if (setAttempts <= failSetAttempts) return json({ ok: false }, 500);
-      allowed = calls.at(-1).body.allowed_updates;
-      return json({ ok: true, result: true });
-    }
-    if (method === 'getWebhookInfo') {
-      return json({ ok: true, result: { url: WEBHOOK_URL, max_connections: 1, pending_update_count: 2, allowed_updates: reportedUpdates || allowed } });
-    }
-    if (method === 'probe') {
-      const authenticated = options.headers?.['x-telegram-bot-api-secret-token'] === secret;
-      return authenticated ? json({ ok: true }) : json({ error: 'Unauthorized' }, unauthStatus);
-    }
-    throw new Error('Unexpected request');
-  };
-  const fakeProcess = { env: { TELEGRAM_BOT_TOKEN: token, TELEGRAM_WEBHOOK_SECRET: secret, WEBHOOK_URL } };
-  const fakeConsole = { log: line => logs.push(String(line)) };
-  const fastTimeout = (fn) => setTimeout(fn, 0);
-  const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-  const script = new AsyncFunction('assert', 'fetch', 'process', 'console', 'setTimeout', rotationScript());
-  let error = null;
-  try { await script(assert, fetchImpl, fakeProcess, fakeConsole, fastTimeout); } catch (caught) { error = caught; }
-  return { calls, logs, error };
-}
-
-test('TG-RELEASE-118 rotation setWebhook subscribes message, callback_query and chat_join_request', async () => {
-  const { calls, logs, error } = await runRotation();
-  assert.equal(error, null);
-  const writes = calls.filter(c => c.method === 'setWebhook');
+test('TG-RELEASE-118 rotation preserves message, callback_query and chat_join_request', async () => {
+  const result = await run();
+  assert.equal(result.exit, 0);
+  const writes = result.calls.filter(c => c.url.endsWith('/setWebhook'));
   assert.equal(writes.length, 1);
-  assert.deepEqual(writes[0].body, {
-    url: WEBHOOK_URL,
-    secret_token: secret,
-    allowed_updates: REQUIRED_UPDATES,
-    max_connections: 1,
-    drop_pending_updates: false
+  assert.deepEqual(JSON.parse(writes[0].opt.body), {
+    url:WEBHOOK_URL,secret_token:secrets.TELEGRAM_WEBHOOK_SECRET,
+    allowed_updates:REQUIRED_UPDATES,max_connections:7,drop_pending_updates:false
   });
-  assert.deepEqual(calls.map(c => c.method), ['setWebhook', 'getWebhookInfo', 'probe', 'probe']);
-  assert.equal(logs.length, 1);
-  assert.match(logs[0], /^TELEGRAM_WEBHOOK_ROTATION_OK /);
-  assert.ok(!logs[0].includes(token) && !logs[0].includes(secret));
+  assert.match(result.output,/^TELEGRAM_WEBHOOK_ROTATION_OK /);
 });
-
-test('TG-RELEASE-118 rotation fails closed when Telegram does not confirm every required update type', async () => {
-  for (const reportedUpdates of [['message', 'callback_query'], ['message', 'chat_join_request'], ['callback_query', 'chat_join_request']]) {
-    const { calls, logs, error } = await runRotation({ reportedUpdates });
-    assert.ok(error, 'verification must reject ' + reportedUpdates.join(','));
-    assert.equal(logs.length, 0);
-    assert.equal(calls.some(c => c.method === 'probe'), false);
+test('TG-RELEASE-118 rotation rejects any missing required update before mutation and after registration', async () => {
+  for (const allowed_updates of [['message','callback_query'],['message','chat_join_request'],['callback_query','chat_join_request']]) {
+    const before = await run({info:{allowed_updates}});
+    assert.equal(before.exit,1);
+    assert.equal(before.put,0);
+    assert.equal(before.set,0);
+    assert.ok(before.calls.every(c=>c.method==='GET'));
+    const after = await run({finalInfo:{allowed_updates}});
+    assert.equal(after.exit,1);
+    assert.equal(after.set,1);
+    assert.doesNotMatch(after.output,/ROTATION_OK/);
+    assert.match(after.output,/BOTH_UPDATED_VERIFICATION_PENDING FINAL_VERIFY/);
   }
 });
-
-test('TG-RELEASE-118 rotation keeps bounded retries, wrong-secret fail-closed probe and the reviewed destination', async () => {
-  const retried = await runRotation({ failSetAttempts: 2 });
-  assert.equal(retried.error, null);
-  const writes = retried.calls.filter(c => c.method === 'setWebhook');
-  assert.equal(writes.length, 3);
-  for (const write of writes) {
-    assert.deepEqual(write.body.allowed_updates, REQUIRED_UPDATES);
-    assert.equal(write.body.drop_pending_updates, false);
-    assert.equal(write.body.max_connections, 1);
-    assert.equal(write.body.url, WEBHOOK_URL);
+test('TG-RELEASE-118 rotation keeps bounded retries, wrong-secret fail-closed probe and reviewed destination', async () => {
+  const retried=await run({tgTimeout:1});
+  assert.equal(retried.exit,0);
+  assert.equal(retried.set,2);
+  for (const write of retried.calls.filter(c=>c.url.endsWith('/setWebhook'))) {
+    const body=JSON.parse(write.opt.body);
+    assert.deepEqual(body.allowed_updates,REQUIRED_UPDATES);
+    assert.equal(body.drop_pending_updates,false);
+    assert.equal(body.max_connections,7);
+    assert.equal(body.url,WEBHOOK_URL);
   }
-
-  const exhausted = await runRotation({ failSetAttempts: 5 });
-  assert.ok(exhausted.error);
-  assert.equal(exhausted.calls.filter(c => c.method === 'setWebhook').length, 5);
-  assert.equal(exhausted.calls.some(c => c.method === 'getWebhookInfo'), false);
-
-  const open = await runRotation({ unauthStatus: 200 });
-  assert.ok(open.error, 'a webhook that accepts a wrong secret must fail the rotation');
-  assert.equal(open.logs.length, 0);
-  const probe = open.calls.find(c => c.method === 'probe');
-  assert.equal(probe.url, WEBHOOK_URL);
-  assert.equal(probe.options.headers['x-telegram-bot-api-secret-token'], 'invalid-rotation-probe-secret');
+  const exhausted=await run({tgTimeout:true});
+  assert.equal(exhausted.exit,1);
+  assert.equal(exhausted.set,3);
+  assert.match(exhausted.output,/CF_SECRET_CONFIRMED_TG_UNRESOLVED/);
+  assert.doesNotMatch(exhausted.output,/ROTATION_OK/);
+  const open=await run({badInvalid:true});
+  assert.equal(open.exit,1);
+  assert.equal(open.put,0);
+  assert.equal(open.set,0);
+  const probe=open.calls.find(c=>c.url===WEBHOOK_URL);
+  assert.equal(probe.opt.headers['X-Telegram-Bot-Api-Secret-Token'],'invalid-rotation-probe-secret');
 });
-
-test('TG-RELEASE-118 workflow keeps its reviewed safeguards and has no narrower allowed_updates list', () => {
-  assert.match(workflow, /^ {2}WEBHOOK_URL: https:\/\/bot\.zaskaleta\.net\/telegram\/stateless$/m);
-  assert.match(workflow, /^ {2}EXPECTED_TELEGRAM_INFO_TREE: [0-9a-f]{40}$/m);
-  assert.match(workflow, /test "\$\(git rev-parse HEAD:telegram-info\)" = "\$EXPECTED_TELEGRAM_INFO_TREE"/);
-  assert.match(workflow, /inputs\.approval == 'ROTATE-TELEGRAM-WEBHOOK-SECRET'/);
-  assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
-  assert.match(workflow, /^permissions:\n {2}contents: read$/m);
-  const lists = [...workflow.matchAll(/allowed_updates:\s*\[([^\]]*)\]/g)].map(match => match[1].split(',').map(value => value.trim().replace(/^'|'$/g, '')));
-  assert.ok(lists.length >= 1);
-  for (const list of lists) assert.deepEqual(list, REQUIRED_UPDATES);
-  assert.doesNotMatch(workflow, /drop_pending_updates:\s*true/);
-  assert.doesNotMatch(workflow, /deleteWebhook/);
+test('TG-RELEASE-118 workflow keeps reviewed safeguards and preserves all required subscriptions plus extras', async () => {
+  assert.match(workflow,/^ {2}WEBHOOK_URL: https:\/\/bot\.zaskaleta\.net\/telegram\/stateless$/m);
+  assert.match(workflow,/^ {2}EXPECTED_TELEGRAM_INFO_TREE: [0-9a-f]{40}$/m);
+  assert.match(workflow,/test "\$\(git rev-parse HEAD:telegram-info\)" = "\$EXPECTED_TELEGRAM_INFO_TREE"/);
+  assert.match(workflow,/inputs\.approval == 'ROTATE-TELEGRAM-WEBHOOK-SECRET'/);
+  assert.match(workflow,/github\.ref == 'refs\/heads\/main'/);
+  assert.match(workflow,/^permissions:\n {2}contents: read$/m);
+  assert.doesNotMatch(workflow,/drop_pending_updates:\s*true/);
+  assert.doesNotMatch(workflow,/deleteWebhook/);
+  const allowed_updates=[...REQUIRED_UPDATES,'edited_message'];
+  const result=await run({info:{allowed_updates}});
+  assert.equal(result.exit,0);
+  assert.deepEqual(JSON.parse(result.calls.find(c=>c.url.endsWith('/setWebhook')).opt.body).allowed_updates,allowed_updates);
 });
 
 // TG-RELEASE-121: the reviewed-tree guard. The exact guard lines of every
@@ -143,7 +142,7 @@ const REF_LINE = 'test "${GITHUB_REF}" = "refs/heads/main"';
 const TREE_LINE = 'test "$(git rev-parse HEAD:telegram-info)" = "$EXPECTED_TELEGRAM_INFO_TREE"';
 // The four guarded workflows (TG-RELEASE-121 amended contract), and how many
 // guarded jobs each has.
-const PINNED = { 'telegram-staging-deploy.yml':1, 'telegram-webhook-migrate.yml':1, 'telegram-webhook-secret-rotate.yml':4, 'telegram-live-verify.yml':1 };
+const PINNED = { 'telegram-staging-deploy.yml':1, 'telegram-webhook-migrate.yml':1, 'telegram-webhook-secret-rotate.yml':2, 'telegram-live-verify.yml':1 };
 
 function guarded(name) {
   const text = readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), 'utf8');

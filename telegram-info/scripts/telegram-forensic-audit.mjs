@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -170,8 +171,14 @@ const mainGuardedPath = path.join(ROOT, GUARDED_WORKFLOWS[0]);
 // Public source validation never grants guarded release authority.
 const PUBLIC_REPO = 'zaskaleta-net/zaskaleta-telegram-bot-public';
 const PUBLIC_BASELINE = 'ops/public-source-baseline.json';
-const PUBLIC_BOOTSTRAP = 'd2dd4c57ffddf4a0ef5848dc0131ae524d91fa32';
-const PUBLIC_BOOTSTRAP_TREE = '36b6fbbd87b71649dd4ff6536249350155135ed6';
+const PUBLIC_RELEASE_MIGRATION = 'e9266851563462b7efc26161b6cc643ce7d67ab4';
+const PUBLIC_RELEASE_MIGRATION_TREE = 'c7e2d2b8a069a13f42ccc5cfbc1377f54358b5b4';
+const PUBLIC_WORKFLOW_TEMPLATES = {
+  ".github/workflows/telegram-staging-deploy.yml": "ddab8d97c43b867fe52d398df432bbaf47a9aa62ff9f4e5182da455fb22df602",
+  ".github/workflows/telegram-live-verify.yml": "b77196b6d7c205b0ffe6b3bc77ba61fea6c15f0f6a713f91f01de4a8b51826b1",
+  ".github/workflows/telegram-webhook-migrate.yml": "bb238ef31d04316af7e978b8415074dcf1f1adb3cce1db0eddc68b9d19512740",
+  ".github/workflows/telegram-webhook-secret-rotate.yml": "30ae3c55e09ed08c45614fe1d07e3ffad6a7816605b61d320a3c63adf4c676c7"
+};
 const PUBLIC_GUARDED_BLOBS = {
   ".github/workflows/telegram-staging-deploy.yml": "c44c1a53ba9bc2d0066510db01dc517ebe2cdea6",
   ".github/workflows/telegram-live-verify.yml": "f449c6d834fed8275e97c3bac730962b6e345fb3",
@@ -235,6 +242,25 @@ function publicSourceContext() {
         && !process.env.GITHUB_BASE_REF && !process.env.GITHUB_HEAD_REF) {
       return 'PUBLIC_SOURCE_MAIN_READ_ONLY';
     }
+    if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch'
+        && process.env.GITHUB_REF === 'refs/heads/main'
+        && ['main','refs/heads/main'].includes(event.ref)
+        && !process.env.GITHUB_BASE_REF && !process.env.GITHUB_HEAD_REF
+        && process.env.GITHUB_WORKFLOW_SHA === headSha) {
+      const prefix = PUBLIC_REPO + '/.github/workflows/';
+      if (process.env.GITHUB_WORKFLOW_REF === prefix + 'telegram-staging-deploy.yml@refs/heads/main'
+          && event.inputs?.approval === 'DEPLOY-TELEGRAM-STAGING') {
+        return 'PUBLIC_PROTECTED_STAGING_MAIN';
+      }
+      if (process.env.GITHUB_WORKFLOW_REF === prefix + 'telegram-webhook-secret-rotate.yml@refs/heads/main'
+          && event.inputs?.approval === 'ROTATE-TELEGRAM-WEBHOOK-SECRET'
+          && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(event.inputs?.expected_active_version || '')) {
+        return 'PUBLIC_PROTECTED_WEBHOOK_ROTATION_MAIN';
+      }
+      if (process.env.GITHUB_WORKFLOW_REF === prefix + 'telegram-live-verify.yml@refs/heads/main') {
+        return 'PUBLIC_PROTECTED_LIVE_VERIFY_MAIN';
+      }
+    }
     const match = /^refs\/pull\/([1-9][0-9]*)\/merge$/u.exec(process.env.GITHUB_REF || '');
     const pull = event.pull_request;
     if (process.env.GITHUB_EVENT_NAME !== 'pull_request' || !match
@@ -255,19 +281,48 @@ function publicSourceContext() {
   }
 }
 
-function publicBaseline(ref) {
+// Only the source-tree value is normalized. Every other workflow byte, including
+// repository identity, permissions, commands and manual gates, is immutable here.
+function workflowTemplateHash(content) {
+  const pin = singlePin(content);
+  if (!pin) throw new Error('protected workflow must have exactly one tree pin');
+  const normalized = content.replace(
+    /^([ \t]*EXPECTED_TELEGRAM_INFO_TREE:[ \t]*)[0-9a-f]{40}([ \t]*)$/mu,
+    '$1<REVIEWED_TREE>$2');
+  return createHash('sha256').update(normalized).digest('hex');
+}
+
+function publicBaseline(ref, { legacy = false } = {}) {
   const raw = gitTrusted(['show',ref + ':' + PUBLIC_BASELINE]);
   const baseline = JSON.parse(raw);
-  if (baseline.version !== 1 || baseline.repository !== PUBLIC_REPO
+  if (baseline.version !== (legacy ? 1 : 2) || baseline.repository !== PUBLIC_REPO
       || !SHA40.test(String(baseline.telegramInfoTree || ''))
       || Object.keys(baseline.guardedWorkflows || {}).length !== GUARDED_WORKFLOWS.length
-      || GUARDED_WORKFLOWS.some(p => baseline.guardedWorkflows[p] !== PUBLIC_GUARDED_BLOBS[p])) {
+      || GUARDED_WORKFLOWS.some(p => !SHA40.test(String(baseline.guardedWorkflows[p] || '')))) {
     throw new Error('invalid public source baseline');
   }
   if (ref === 'HEAD' && read(path.join(ROOT,PUBLIC_BASELINE)) !== raw) {
     throw new Error('public source baseline has uncommitted changes');
   }
   return baseline;
+}
+
+function verifyPublicWorkflows(ref, baseline, legacy = false) {
+  for (const p of GUARDED_WORKFLOWS) {
+    const blob = gitTrusted(['rev-parse',ref + ':' + p]);
+    if (blob !== baseline.guardedWorkflows[p]) throw new Error('protected workflow blob differs from baseline');
+    if (legacy) {
+      if (blob !== PUBLIC_GUARDED_BLOBS[p]) throw new Error('migration protected workflow changed');
+    } else {
+      const content = gitTrusted(['show',ref + ':' + p]);
+      if (workflowTemplateHash(content) !== PUBLIC_WORKFLOW_TEMPLATES[p]) {
+        throw new Error('protected workflow differs from reviewed immutable template');
+      }
+      if (singlePin(content) !== baseline.telegramInfoTree) {
+        throw new Error('protected workflow source pin differs from baseline');
+      }
+    }
+  }
 }
 
 function verifyPublicSource() {
@@ -277,23 +332,17 @@ function verifyPublicSource() {
     if (forensicContext === 'PUBLIC_SOURCE_PR_READ_ONLY') {
       const mainRef = 'refs/remotes/origin/main';
       trustedMainTree = gitTrusted(['rev-parse',mainRef + ':telegram-info']);
-      // Only the exact independently reviewed import can bootstrap a missing manifest.
-      if (gitTrusted(['rev-parse',mainRef]) === PUBLIC_BOOTSTRAP) {
-        if (trustedMainTree !== PUBLIC_BOOTSTRAP_TREE) throw new Error('bootstrap source tree mismatch');
-      } else if (publicBaseline(mainRef).telegramInfoTree !== trustedMainTree) {
-        throw new Error('trusted main source baseline is stale');
+      // One explicit migration from the reviewed source-only main. A proposed
+      // manifest cannot authorize a different legacy main or workflow template.
+      const legacy = gitTrusted(['rev-parse',mainRef]) === PUBLIC_RELEASE_MIGRATION;
+      const trusted = publicBaseline(mainRef, { legacy });
+      if (legacy && trustedMainTree !== PUBLIC_RELEASE_MIGRATION_TREE) {
+        throw new Error('migration source tree mismatch');
       }
-      for (const p of GUARDED_WORKFLOWS) {
-        if (gitTrusted(['rev-parse',mainRef + ':' + p]) !== PUBLIC_GUARDED_BLOBS[p]) {
-          throw new Error('trusted main protected workflow changed');
-        }
-      }
+      if (trusted.telegramInfoTree !== trustedMainTree) throw new Error('trusted main source baseline is stale');
+      verifyPublicWorkflows(mainRef, trusted, legacy);
     }
-    for (const p of GUARDED_WORKFLOWS) {
-      if (gitTrusted(['rev-parse','HEAD:' + p]) !== PUBLIC_GUARDED_BLOBS[p]) {
-        throw new Error('public source must preserve protected workflows');
-      }
-    }
+    verifyPublicWorkflows('HEAD', proposed);
   } catch (error) {
     add('P0','PUBLIC_SOURCE_BASELINE_INVALID',path.join(ROOT,PUBLIC_BASELINE),1,error.message);
   }
@@ -329,7 +378,7 @@ if (githubTrusted) {
   }
 }
 if (forensicContext === 'INVALID') forensicContext = publicSourceContext();
-if (forensicContext.startsWith('PUBLIC_SOURCE_')) verifyPublicSource();
+if (forensicContext.startsWith('PUBLIC_')) verifyPublicSource();
 if (forensicContext === 'INVALID') {
   add('P0','GUARDED_TREE_CONTEXT_INVALID',mainGuardedPath,1,
     'forensic validation requires verified GitHub PR merge context or checked-out main');
