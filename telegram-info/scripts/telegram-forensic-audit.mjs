@@ -167,6 +167,19 @@ const GUARDED_WORKFLOWS = [
 ];
 const mainGuardedPath = path.join(ROOT, GUARDED_WORKFLOWS[0]);
 
+// Public source validation never grants guarded release authority.
+const PUBLIC_REPO = 'zaskaleta-net/zaskaleta-telegram-bot-public';
+const PUBLIC_BASELINE = 'ops/public-source-baseline.json';
+const PUBLIC_BOOTSTRAP = 'd2dd4c57ffddf4a0ef5848dc0131ae524d91fa32';
+const PUBLIC_BOOTSTRAP_TREE = '36b6fbbd87b71649dd4ff6536249350155135ed6';
+const PUBLIC_GUARDED_BLOBS = {
+  ".github/workflows/telegram-staging-deploy.yml": "c44c1a53ba9bc2d0066510db01dc517ebe2cdea6",
+  ".github/workflows/telegram-live-verify.yml": "f449c6d834fed8275e97c3bac730962b6e345fb3",
+  ".github/workflows/telegram-webhook-migrate.yml": "42399516ad952de6cf25d42807e1ffda9099d03a",
+  ".github/workflows/telegram-webhook-secret-rotate.yml": "21f0d15b76b06a7a736d614480b3a95473aaa275"
+};
+
+
 function gitTrusted(args) {
   const output = execFileSync('git', args, {
     cwd:ROOT, encoding:'utf8', stdio:['ignore','pipe','pipe']
@@ -207,6 +220,85 @@ function sourcePrContext() {
   }
 }
 
+
+function publicSourceContext() {
+  if (process.env.GITHUB_ACTIONS !== 'true'
+      || process.env.GITHUB_REPOSITORY !== PUBLIC_REPO
+      || !SHA40.test(String(process.env.GITHUB_SHA || ''))
+      || process.env.GITHUB_SHA !== headSha) return 'INVALID';
+  try {
+    const event = JSON.parse(read(process.env.GITHUB_EVENT_PATH));
+    if (event?.repository?.full_name !== PUBLIC_REPO) return 'INVALID';
+    if (process.env.GITHUB_EVENT_NAME === 'push'
+        && process.env.GITHUB_REF === 'refs/heads/main'
+        && event.ref === 'refs/heads/main' && event.after === headSha
+        && !process.env.GITHUB_BASE_REF && !process.env.GITHUB_HEAD_REF) {
+      return 'PUBLIC_SOURCE_MAIN_READ_ONLY';
+    }
+    const match = /^refs\/pull\/([1-9][0-9]*)\/merge$/u.exec(process.env.GITHUB_REF || '');
+    const pull = event.pull_request;
+    if (process.env.GITHUB_EVENT_NAME !== 'pull_request' || !match
+        || event.number !== Number(match[1]) || pull?.number !== Number(match[1])
+        || pull?.base?.repo?.full_name !== PUBLIC_REPO
+        || pull?.head?.repo?.full_name !== PUBLIC_REPO
+        || pull.base.ref !== 'main' || process.env.GITHUB_BASE_REF !== 'main'
+        || pull.head.ref !== process.env.GITHUB_HEAD_REF
+        || !/^agent\/[a-z-]+\/[A-Za-z0-9._/-]+$/u.test(pull.head.ref)
+        || !SHA40.test(String(pull.base.sha || ''))
+        || !SHA40.test(String(pull.head.sha || ''))
+        || gitTrusted(['rev-parse','refs/remotes/origin/main']) !== pull.base.sha
+        || gitTrusted(['rev-list','--parents','-n','1','HEAD']) !==
+          `${headSha} ${pull.base.sha} ${pull.head.sha}`) return 'INVALID';
+    return 'PUBLIC_SOURCE_PR_READ_ONLY';
+  } catch {
+    return 'INVALID';
+  }
+}
+
+function publicBaseline(ref) {
+  const raw = gitTrusted(['show',ref + ':' + PUBLIC_BASELINE]);
+  const baseline = JSON.parse(raw);
+  if (baseline.version !== 1 || baseline.repository !== PUBLIC_REPO
+      || !SHA40.test(String(baseline.telegramInfoTree || ''))
+      || Object.keys(baseline.guardedWorkflows || {}).length !== GUARDED_WORKFLOWS.length
+      || GUARDED_WORKFLOWS.some(p => baseline.guardedWorkflows[p] !== PUBLIC_GUARDED_BLOBS[p])) {
+    throw new Error('invalid public source baseline');
+  }
+  if (ref === 'HEAD' && read(path.join(ROOT,PUBLIC_BASELINE)) !== raw) {
+    throw new Error('public source baseline has uncommitted changes');
+  }
+  return baseline;
+}
+
+function verifyPublicSource() {
+  try {
+    const proposed = publicBaseline('HEAD');
+    if (proposed.telegramInfoTree !== currentTree) throw new Error('proposed source baseline is stale');
+    if (forensicContext === 'PUBLIC_SOURCE_PR_READ_ONLY') {
+      const mainRef = 'refs/remotes/origin/main';
+      trustedMainTree = gitTrusted(['rev-parse',mainRef + ':telegram-info']);
+      // Only the exact independently reviewed import can bootstrap a missing manifest.
+      if (gitTrusted(['rev-parse',mainRef]) === PUBLIC_BOOTSTRAP) {
+        if (trustedMainTree !== PUBLIC_BOOTSTRAP_TREE) throw new Error('bootstrap source tree mismatch');
+      } else if (publicBaseline(mainRef).telegramInfoTree !== trustedMainTree) {
+        throw new Error('trusted main source baseline is stale');
+      }
+      for (const p of GUARDED_WORKFLOWS) {
+        if (gitTrusted(['rev-parse',mainRef + ':' + p]) !== PUBLIC_GUARDED_BLOBS[p]) {
+          throw new Error('trusted main protected workflow changed');
+        }
+      }
+    }
+    for (const p of GUARDED_WORKFLOWS) {
+      if (gitTrusted(['rev-parse','HEAD:' + p]) !== PUBLIC_GUARDED_BLOBS[p]) {
+        throw new Error('public source must preserve protected workflows');
+      }
+    }
+  } catch (error) {
+    add('P0','PUBLIC_SOURCE_BASELINE_INVALID',path.join(ROOT,PUBLIC_BASELINE),1,error.message);
+  }
+}
+
 let headSha = null;
 let currentTree = null;
 let trustedMainTree = null;
@@ -236,6 +328,8 @@ if (githubTrusted) {
     forensicContext = 'PROTECTED_MAIN';
   }
 }
+if (forensicContext === 'INVALID') forensicContext = publicSourceContext();
+if (forensicContext.startsWith('PUBLIC_SOURCE_')) verifyPublicSource();
 if (forensicContext === 'INVALID') {
   add('P0','GUARDED_TREE_CONTEXT_INVALID',mainGuardedPath,1,
     'forensic validation requires verified GitHub PR merge context or checked-out main');
