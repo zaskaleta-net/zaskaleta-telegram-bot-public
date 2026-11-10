@@ -12,14 +12,14 @@ concurrency:
 
 jobs:
   verify:
-    if: github.repository == 'zaskaleta-net/zaskaleta-telegram-bot' && github.ref == 'refs/heads/main'
+    if: github.repository == 'zaskaleta-net/zaskaleta-telegram-bot-public' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: telegram-registration
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
-      EXPECTED_TELEGRAM_INFO_TREE: 41454c5700b7c95d5f5acf2436231e66ab2237f4
+      EXPECTED_TELEGRAM_INFO_TREE: 3090a7008c67b275fc13a4c320b5c254e90cd7ca
     steps:
       - uses: actions/checkout@v4
         with:
