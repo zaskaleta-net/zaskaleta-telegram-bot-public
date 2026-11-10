@@ -1,0 +1,76 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "zaskaleta-info-telegram-staging",
+  "main": "src/worker-entry-pilot-v21.mjs",
+  "compatibility_date": "2026-09-08",
+  "compatibility_flags": ["durable_object_io_tasks_prevent_eviction"],
+  "workers_dev": true,
+  "send_metrics": false,
+  "logpush": false,
+  "keep_vars": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false }
+  },
+  "triggers": {
+    "crons": ["*/15 * * * *", "30 8 * * *"]
+  },
+  "ai": { "binding": "AI" },
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "durable_objects": {
+    "bindings": [{ "name": "OUTBOX", "class_name": "TelegramOutbox" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TelegramOutbox"] }],
+  "vars": {
+    "TELEGRAM_INGRESS_ENABLED": "false",
+    "TELEGRAM_DELIVERY_ENABLED": "false",
+    "TELEGRAM_DAILY_NEWS_ENABLED": "true",
+    "TELEGRAM_PILOT_MODE": "allowlist",
+    "TELEGRAM_RELEASE_APPROVED": "",
+    "TELEGRAM_ALLOWED_CHAT_IDS": "",
+    "TELEGRAM_ADMIN_USER_IDS": "",
+    "TELEGRAM_MAINTENANCE_MODE": "true",
+    "POSTHOG_ENABLED": "false",
+    "AI_ASSISTANT_ENABLED": "false",
+    "HOUSING_WATCH_ENABLED": "false",
+    "AI_PREMIUM_ENABLED": "false"
+  },
+  "env": {
+    "staging": {
+      "name": "zaskaleta-info-telegram-staging",
+      "workers_dev": true,
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "redact_query_string": true,
+        "logs": { "enabled": true, "invocation_logs": false }
+      },
+      "triggers": {
+        "crons": ["*/15 * * * *", "30 8 * * *"]
+      },
+      "ai": { "binding": "AI" },
+      "version_metadata": { "binding": "CF_VERSION_METADATA" },
+      "durable_objects": {
+        "bindings": [{ "name": "OUTBOX", "class_name": "TelegramOutbox" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TelegramOutbox"] }],
+      "vars": {
+        "TELEGRAM_INGRESS_ENABLED": "true",
+        "TELEGRAM_DELIVERY_ENABLED": "true",
+        "TELEGRAM_DAILY_NEWS_ENABLED": "true",
+        "TELEGRAM_PILOT_MODE": "public",
+        "TELEGRAM_RELEASE_APPROVED": "public-v1",
+        "TELEGRAM_MAINTENANCE_MODE": "false",
+        "KLAZ_API_ENABLED": "false",
+        "POSTHOG_ENABLED": "false",
+        "POSTHOG_HOST": "https://us.i.posthog.com",
+        "AI_ASSISTANT_ENABLED": "true",
+        "HOUSING_WATCH_ENABLED": "true",
+        "AI_PREMIUM_ENABLED": "false",
+        "AI_EXTERNAL_ENABLED": "true"
+      }
+    }
+  }
+}

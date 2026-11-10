@@ -1,0 +1,25 @@
+{
+  "name": "zaskaleta-telegram-info",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check-syntax.mjs",
+    "test": "node --test test/*.test.mjs",
+    "prepare": "node scripts/cloudflare-build-qa.mjs",
+    "verify:staging": "node scripts/verify-live-staging.mjs",
+    "verify:baseline": "node scripts/verify-stable-baseline.mjs",
+    "qa:full": "node scripts/full-release-qa.mjs",
+    "qa:staging": "npm run qa:full && npm run verify:staging",
+    "qa:bot": "node scripts/full-bot-audit.mjs",
+    "qa:housing:live": "node scripts/live-housing-source-audit.mjs",
+    "release:staging": "node scripts/cloudflare-candidate-slot.mjs"
+  },
+  "devDependencies": {
+    "exceljs": "4.4.0",
+    "wrangler": "4.130.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

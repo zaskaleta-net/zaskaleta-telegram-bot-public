@@ -1,0 +1,26 @@
+{
+  "channel": "public",
+  "baseline": "v21",
+  "status": "verified",
+  "completion_status": "pending-final-user-smoke",
+  "entrypoint": "src/worker-entry-pilot-v21.mjs",
+  "verified_commit": "d230efd28ab2b32daf7d3c1e4111be1e5da411ce",
+  "verified_telegram_info_tree": "05f2559bcc3e78b56d3410b6dd2ea4b670de6d12",
+  "rollback_ref": "stable-telegram-v21",
+  "worker": "zaskaleta-info-telegram-staging",
+  "cloudflare_build": "f051957c-8f80-49f7-ad7a-316fc161496d",
+  "cloudflare_version_id": "f051957c-8f80-49f7-ad7a-316fc161496d",
+  "guarded_deploy_run": 36438638071,
+  "live_verification_run": 36439570325,
+  "hmac_mode": "hmac-only",
+  "posthog_telemetry": "enabled-personless-aggregate",
+  "posthog_event_verified": "telegram webhook processed",
+  "manual_final_smoke": "pending",
+  "includes": [
+    "public-telegram-runtime",
+    "rule-driven-jobcenter-housing",
+    "bug-bridge-hmac-only",
+    "privacy-safe-posthog-telemetry"
+  ],
+  "promotion_policy": "fail-closed"
+}
