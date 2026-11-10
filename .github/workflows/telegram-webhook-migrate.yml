@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 5
     environment: telegram-registration
     env:
-      EXPECTED_TELEGRAM_INFO_TREE: 3090a7008c67b275fc13a4c320b5c254e90cd7ca
+      EXPECTED_TELEGRAM_INFO_TREE: ebd78c32e9a3ee5dfdd2376569bc3aa598793179
     steps:
       - uses: actions/checkout@v4
         with:
