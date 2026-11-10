@@ -1,0 +1,99 @@
+name: Telegram Webhook — Read-only Preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-webhook-secret-rotation
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.repository == 'zaskaleta-net/zaskaleta-telegram-bot-public' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify rotation prerequisites without changing the bot
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          let failure = 'PREFLIGHT_UNAVAILABLE';
+          function requireValue(condition, code) {
+            if (!condition) {
+              failure = code;
+              throw null;
+            }
+          }
+          async function readJson(url, headers = {}) {
+            const response = await fetch(url, {
+              method: 'GET', headers, redirect: 'error',
+              signal: AbortSignal.timeout(15000)
+            });
+            if (!response.ok) return { status: response.status, body: null };
+            return { status: response.status, body: await response.json() };
+          }
+          try {
+            const token = process.env.TELEGRAM_BOT_TOKEN || '';
+            const secret = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+            const account = process.env.CLOUDFLARE_ACCOUNT_ID || '';
+            const cfToken = process.env.CLOUDFLARE_API_TOKEN || '';
+            requireValue(/^[A-Za-z0-9_-]{32,256}$/.test(secret), 'WEBHOOK_SECRET_MISSING_OR_INVALID_FORMAT');
+            requireValue(/^[0-9]{5,20}:[A-Za-z0-9_-]{30,256}$/.test(token), 'TELEGRAM_TOKEN_MISSING_OR_INVALID_FORMAT');
+            requireValue(/^[a-fA-F0-9]{32}$/.test(account), 'CLOUDFLARE_ACCOUNT_MISSING_OR_INVALID_FORMAT');
+            requireValue(cfToken.length > 0 && !/\s/.test(cfToken), 'CLOUDFLARE_TOKEN_MISSING_OR_INVALID_FORMAT');
+            console.log('PREFLIGHT_INPUT_FORMATS_OK');
+
+            failure = 'TELEGRAM_IDENTITY_CHECK_UNAVAILABLE';
+            const me = await readJson('https://api.telegram.org/bot' + token + '/getMe');
+            requireValue(me.status === 200 && me.body?.ok === true, 'TELEGRAM_IDENTITY_REQUEST_FAILED');
+            requireValue(me.body?.result?.is_bot === true && me.body.result.username === 'ZaskaletaInfoBot', 'TELEGRAM_TOKEN_WRONG_BOT');
+            console.log('PREFLIGHT_BOT_IDENTITY_OK');
+
+            failure = 'TELEGRAM_WEBHOOK_CHECK_UNAVAILABLE';
+            const webhook = await readJson('https://api.telegram.org/bot' + token + '/getWebhookInfo');
+            requireValue(webhook.status === 200 && webhook.body?.ok === true, 'TELEGRAM_WEBHOOK_REQUEST_FAILED');
+            requireValue(webhook.body?.result?.url === 'https://bot.zaskaleta.net/telegram/stateless', 'TELEGRAM_WEBHOOK_TARGET_MISMATCH');
+            const pending = webhook.body.result.pending_update_count;
+            requireValue(Number.isSafeInteger(pending) && pending >= 0, 'TELEGRAM_WEBHOOK_RESPONSE_INVALID');
+            console.log('PREFLIGHT_WEBHOOK_TARGET_OK');
+
+            failure = 'CLOUDFLARE_DEPLOYMENT_CHECK_UNAVAILABLE';
+            const cf = await readJson('https://api.cloudflare.com/client/v4/accounts/' + account + '/workers/scripts/zaskaleta-info-telegram-staging/deployments', {
+              Authorization: 'Bearer ' + cfToken
+            });
+            requireValue(cf.status !== 401 && cf.status !== 403, 'CLOUDFLARE_ACCESS_DENIED');
+            requireValue(cf.status === 200 && cf.body?.success === true, 'CLOUDFLARE_DEPLOYMENT_REQUEST_FAILED');
+            const deployments = cf.body?.result?.deployments;
+            requireValue(Array.isArray(deployments) && deployments.length > 0, 'CLOUDFLARE_DEPLOYMENT_RESPONSE_INVALID');
+            requireValue(deployments.every(item => typeof item?.created_on === 'string' && Number.isFinite(Date.parse(item.created_on))), 'CLOUDFLARE_DEPLOYMENT_RESPONSE_INVALID');
+            const current = [...deployments].sort((a, b) => Date.parse(b.created_on) - Date.parse(a.created_on))[0];
+            requireValue(current.strategy === 'percentage' && Array.isArray(current.versions) && current.versions.length === 1 && current.versions[0]?.percentage === 100, 'CLOUDFLARE_SINGLE_ACTIVE_VERSION_REQUIRED');
+            const version = current.versions[0].version_id;
+            requireValue(typeof version === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(version), 'CLOUDFLARE_VERSION_INVALID');
+            console.log('PREFLIGHT_CLOUDFLARE_READ_ACCESS_OK');
+
+            failure = 'LIVE_HEALTH_CHECK_UNAVAILABLE';
+            const health = await readJson('https://bot.zaskaleta.net/health');
+            requireValue(health.status === 200 && health.body?.ok === true && health.body?.delivery === true, 'LIVE_HEALTH_NOT_READY');
+            requireValue(health.body.versionId === version, 'LIVE_VERSION_MISMATCH');
+            console.log('WEBHOOK_PREFLIGHT_OK ' + JSON.stringify({
+              secretFormatValid: true, botIdentityValid: true, webhookTargetValid: true,
+              cloudflareReadAccess: true, singleActiveVersion: true, liveHealthy: true,
+              activeVersionId: version, pendingUpdateCount: pending,
+              secretInstallationVerified: false, rotationPerformed: false
+            }));
+          } catch {
+            // API errors may contain credentials or private metadata. Never print them.
+            console.error(failure);
+            process.exitCode = 1;
+          }
+          NODE
