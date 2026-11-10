@@ -27,6 +27,13 @@ const pin = process.env.FAKE_PIN;
 const mode = process.env.FAKE_MODE || '';
 const name = args[args.length - 1] || '';
 const publicRun = process.env.GITHUB_REPOSITORY === 'zaskaleta-net/zaskaleta-telegram-bot-public';
+const legacyMain = mode === 'legacy-main' || mode === 'legacy-main-wrong-blob';
+const legacyBaseline = {version:1,repository:'zaskaleta-net/zaskaleta-telegram-bot-public',telegramInfoTree:'c7e2d2b8a069a13f42ccc5cfbc1377f54358b5b4',guardedWorkflows:{
+    ".github/workflows/telegram-staging-deploy.yml": "c44c1a53ba9bc2d0066510db01dc517ebe2cdea6",
+    ".github/workflows/telegram-live-verify.yml": "f449c6d834fed8275e97c3bac730962b6e345fb3",
+    ".github/workflows/telegram-webhook-migrate.yml": "42399516ad952de6cf25d42807e1ffda9099d03a",
+    ".github/workflows/telegram-webhook-secret-rotate.yml": "21f0d15b76b06a7a736d614480b3a95473aaa275"
+  }};
 const baseline = publicRun ? JSON.parse(fs.readFileSync(path.join(repo,'ops/public-source-baseline.json'),'utf8')) : null;
 if (args[0] === 'rev-list') {
   process.stdout.write((process.env.FAKE_PARENTS || 'f'.repeat(40) + ' ' + (process.env.FAKE_MAIN_SHA || 'c'.repeat(40)) + ' ' + 'd'.repeat(40)) + '\n');
@@ -57,7 +64,7 @@ if (args[0] === 'rev-parse') {
     }
     if (name === 'refs/remotes/origin/main:' + candidate) {
       if (mode === 'missing-main') fail();
-      emit(publicRun ? baseline.guardedWorkflows[candidate] : 'a'.repeat(40));
+      emit(legacyMain ? (mode === 'legacy-main-wrong-blob' ? 'a'.repeat(40) : legacyBaseline.guardedWorkflows[candidate]) : publicRun ? baseline.guardedWorkflows[candidate] : 'a'.repeat(40));
     }
   }
 }
@@ -68,7 +75,7 @@ if (args[0] === 'show'
   const candidate = name.slice(fromMain ? 'refs/remotes/origin/main:'.length : 'HEAD:'.length);
   if (candidate === 'ops/public-source-baseline.json' && publicRun) {
     if (mode === 'missing-baseline' || (fromMain && mode === 'missing-main-baseline')) fail();
-    let raw = fs.readFileSync(path.join(repo,candidate),'utf8');
+    let raw = fromMain && legacyMain ? JSON.stringify(legacyBaseline) : fs.readFileSync(path.join(repo,candidate),'utf8');
     if (mode === 'dirty-baseline' && !fromMain) raw += ' ';
     if (mode === 'invalid-baseline') raw = raw.replace(baseline.repository,'attacker/fork');
     process.stdout.write(raw); process.exit(0);
@@ -85,6 +92,15 @@ if (args[0] === 'show'
   }
   if (!fromMain && mode === 'uncommitted-workflow' && candidate === paths[0]) {
     source = source.replace(/^name:/mu, 'name: Modified committed');
+  }
+  if (publicRun && !fromMain) {
+    if (mode === 'template-command') source = source.replace('npm test', 'echo skipped');
+    if (mode === 'template-permissions') source = source.replace('contents: read', 'contents: write');
+    if (mode === 'template-repo') source = source.replace('zaskaleta-net/zaskaleta-telegram-bot-public', 'attacker/fork');
+    if (mode === 'template-approval') source = source.replace("inputs.approval == 'DEPLOY-TELEGRAM-STAGING'", 'true');
+    if (mode === 'template-extra-pin') source += '\n      EXPECTED_TELEGRAM_INFO_TREE: ' + pin + '\n';
+    if (mode === 'template-rotator-public' && candidate === paths[3]) source = source.replace("github.repository == 'zaskaleta-net/zaskaleta-telegram-bot'", "github.repository == 'zaskaleta-net/zaskaleta-telegram-bot-public'");
+    if (mode === 'template-stale-pin') source = source.replace(/EXPECTED_TELEGRAM_INFO_TREE:\s*[0-9a-f]{40}/u, 'EXPECTED_TELEGRAM_INFO_TREE: ' + 'e'.repeat(40));
   }
   process.stdout.write(source);
   process.exit(0);
@@ -247,11 +263,12 @@ function publicAudit(options = {}) {
     event.pull_request.base.repo.full_name = PUBLIC_REPO;
     event.pull_request.head.repo.full_name = PUBLIC_REPO;
     if (options.bootstrap) event.pull_request.base.sha = 'd2dd4c57ffddf4a0ef5848dc0131ae524d91fa32';
+    if (options.migration) event.pull_request.base.sha = '572e393ec53f7a499369af749944f80befb54b9d';
   }
   options.mutateEvent?.(event);
   return runAudit({ ...options, event, headTree: options.headTree || publicPin(), mainTree: options.mainTree || publicPin(),
     env: { GITHUB_REPOSITORY: PUBLIC_REPO, GITHUB_EVENT_NAME: pr ? 'pull_request' : 'push',
-      ...(options.bootstrap ? { FAKE_MAIN_SHA: 'd2dd4c57ffddf4a0ef5848dc0131ae524d91fa32' } : {}), ...options.env } });
+      ...(options.bootstrap ? { FAKE_MAIN_SHA: 'd2dd4c57ffddf4a0ef5848dc0131ae524d91fa32' } : {}), ...(options.migration ? { FAKE_MAIN_SHA:'572e393ec53f7a499369af749944f80befb54b9d' } : {}), ...options.env } });
 }
 test('public main push validates source without release authority', () => {
   const run = publicAudit(); pass(run);
@@ -262,8 +279,8 @@ test('public same-repository PR validates source', () => {
   const run = publicAudit({kind:'pr'}); pass(run);
   assert.match(run.stdout, /PUBLIC_SOURCE_PR_READ_ONLY/u);
 });
-test('public initial import bootstrap accepts only exact reviewed tree', () => {
-  pass(publicAudit({kind:'pr',bootstrap:true,mainTree:'36b6fbbd87b71649dd4ff6536249350155135ed6',mode:'missing-main-baseline'}));
+test('public release transition no longer accepts old import without a baseline', () => {
+  failClosed(publicAudit({kind:'pr',bootstrap:true,mainTree:'36b6fbbd87b71649dd4ff6536249350155135ed6',mode:'missing-main-baseline'}),'PUBLIC_SOURCE_BASELINE_INVALID');
   failClosed(publicAudit({kind:'pr',bootstrap:true,mainTree:BASE}), 'PUBLIC_SOURCE_BASELINE_INVALID');
 });
 for (const mode of ['missing-baseline','dirty-baseline','invalid-baseline','changed-protected-file']) {
@@ -304,4 +321,60 @@ test('public push rejects mismatched event ref and after SHA', () => {
 });
 test('public source rejects dirty protected workflow', () => {
   failClosed(publicAudit({mode:'uncommitted-workflow'}), 'GUARDED_WORKFLOW_CHECKOUT_MODIFIED');
+});
+
+function publicManual(options = {}) {
+  const workflow = options.workflow || 'telegram-staging-deploy.yml';
+  return publicAudit({
+    ...options,
+    mutateEvent:event => {
+      delete event.after;
+      event.ref = 'main';
+      event.inputs = { approval:'DEPLOY-TELEGRAM-STAGING' };
+      options.mutateEvent?.(event);
+    },
+    env:{ GITHUB_EVENT_NAME:'workflow_dispatch',
+      GITHUB_WORKFLOW_REF:PUBLIC_REPO + '/.github/workflows/' + workflow + '@refs/heads/main',
+      GITHUB_WORKFLOW_SHA:HEAD, ...options.env }
+  });
+}
+test('public reviewed manual staging dispatch validates protected release context', () => {
+  const run = publicManual(); pass(run);
+  assert.match(run.stdout, /PUBLIC_PROTECTED_STAGING_MAIN/u);
+});
+test('public reviewed manual live verification validates separate non-deploy context', () => {
+  const run = publicManual({workflow:'telegram-live-verify.yml',mutateEvent:e=>{delete e.inputs;}}); pass(run);
+  assert.match(run.stdout, /PUBLIC_PROTECTED_LIVE_VERIFY_MAIN/u);
+});
+for (const [label,options] of Object.entries({
+  wrongWorkflow:{workflow:'telegram-webhook-migrate.yml'},
+  rotateWorkflow:{workflow:'telegram-webhook-secret-rotate.yml'},
+  unknownWorkflow:{workflow:'unknown.yml'},
+  wrongWorkflowSha:{env:{GITHUB_WORKFLOW_SHA:BASE}},
+  wrongWorkflowRef:{env:{GITHUB_WORKFLOW_REF:PUBLIC_REPO+'/.github/workflows/telegram-staging-deploy.yml@refs/heads/agent/release-agent/x'}},
+  missingApproval:{mutateEvent:e=>{delete e.inputs;}},
+  wrongApproval:{mutateEvent:e=>{e.inputs.approval='DEPLOY';}},
+  eventRef:{mutateEvent:e=>{e.ref='other';}},
+  eventTag:{mutateEvent:e=>{e.ref='refs/tags/main';}},
+  prRefs:{env:{GITHUB_HEAD_REF:BRANCH}},
+  wrongRepo:{env:{GITHUB_REPOSITORY:'attacker/fork'}}
+})) {
+  test('public manual rejects ' + label,()=>failClosed(publicManual(options),'GUARDED_TREE_CONTEXT_INVALID'));
+}
+
+test('public migration accepts only exact reviewed source-only main and legacy blobs',()=>{
+  const options={kind:'pr',migration:true,mode:'legacy-main',mainTree:'c7e2d2b8a069a13f42ccc5cfbc1377f54358b5b4'};
+  pass(publicAudit(options));
+  failClosed(publicAudit({...options,migration:false}),'PUBLIC_SOURCE_BASELINE_INVALID');
+  failClosed(publicAudit({...options,mainTree:BASE}),'PUBLIC_SOURCE_BASELINE_INVALID');
+  failClosed(publicAudit({...options,mode:'legacy-main-wrong-blob'}),'PUBLIC_SOURCE_BASELINE_INVALID');
+});
+for (const mode of ['template-command','template-permissions','template-repo','template-approval','template-extra-pin','template-rotator-public','template-stale-pin']) {
+  test('public immutable workflow rejects '+mode,()=>{
+    failClosed(publicManual({mode}),'PUBLIC_SOURCE_BASELINE_INVALID');
+  });
+}
+
+test('public manual accepts fully qualified main event ref with exact main runner ref',()=>{
+  pass(publicManual({mutateEvent:e=>{e.ref='refs/heads/main';}}));
 });
