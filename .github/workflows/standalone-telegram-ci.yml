@@ -69,9 +69,39 @@ jobs:
       - name: Telegram runtime syntax
         run: npm --prefix telegram-info run check
 
-      - name: Telegram full suite
+      - name: Offline CI network policy tests (no network calls)
+        run: node --test .github/qa/ci-offline-network-policy.test.mjs
+
+      - name: Telegram full suite (OS-isolated; no outbound network)
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='node:22.23.4-bookworm@sha256:e273cf2a19c7334c03f52e2ca933ecdfc3fbfaad49db7b8bc8c3edd9ac34e9c7'
+          docker pull "$image"
+          docker run --rm --pull=never \
+            --network none \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --read-only \
+            --tmpfs /tmp:rw,exec,nosuid,size=512m \
+            --pids-limit 512 \
+            --user "$(id -u):$(id -g)" \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --workdir /workspace/telegram-info \
+            --env HOME=/tmp \
+            --env CI=true \
+            --env GITHUB_ACTIONS=true \
+            --env NODE_OPTIONS=--import=/workspace/.github/qa/ci-offline-network-guard.mjs \
+            "$image" npm test
+
+      - name: PR candidate staging bundle preflight (offline, no deploy)
+        if: github.event_name == 'pull_request'
         working-directory: telegram-info
-        run: npm test
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          node --test ../.github/qa/premerge-staging-readiness.test.mjs
+          node ../.github/qa/premerge-staging-readiness.mjs
 
       - name: Telegram stable baseline
         working-directory: telegram-info
