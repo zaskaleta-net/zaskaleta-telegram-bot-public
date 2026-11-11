@@ -1,0 +1,92 @@
+task_id: TG-PUBLIC-010
+base_sha: 55c23b7f18371648e08173c0373dd7f3ea34b84a
+owner: release-agent
+reviewer: security-reviewer
+severity: P1
+type: release
+
+triage:
+  symptom: >
+    PR #8 passes source CI and security review but cannot exercise the main-only
+    guarded Cloudflare staging deployment before merge.
+  expected: >
+    A pull request has a fail-closed, credential-free build verification of its
+    exact checked-out candidate before any merge decision.
+  actual: >
+    The existing staging workflow is manual, main-only and uses a reviewed tree
+    pin; PR CI currently lacks a Cloudflare staging bundle dry-run.
+  likely_root_cause: >
+    Source-only CI and the protected staging deployment serve different trust
+    boundaries; no candidate bundle preflight bridges them.
+  affected_flow: Telegram release candidate pre-merge validation.
+  risk: >
+    Running the existing staging workflow for a PR would be misleading or
+    require weakening main-only, reviewed-tree and secret boundaries.
+  owner: release-agent
+  reviewer: security-reviewer
+
+goal: >
+  Add a read-only, credential-free PR candidate preflight to the existing
+  Telegram isolation CI. Validate exact same-repository PR context and compile
+  a Cloudflare staging bundle only with Wrangler --dry-run. This is NOT an
+  actual staging deployment or replacement for any release gate.
+
+scope:
+  allowed_paths:
+    - ops/subagents/contracts/TG-PUBLIC-010.yml
+    - .github/qa/premerge-staging-readiness.mjs
+    - .github/qa/premerge-staging-readiness.test.mjs
+    - .github/workflows/standalone-telegram-ci.yml
+  forbidden_paths:
+    - .github/workflows/telegram-staging-deploy.yml
+    - .github/workflows/telegram-live-verify.yml
+    - .github/workflows/telegram-webhook-migrate.yml
+    - .github/workflows/telegram-webhook-secret-rotate.yml
+    - telegram-info/src/**
+    - telegram-info/scripts/**
+    - telegram-info/test/**
+    - telegram-info/wrangler.jsonc
+    - telegram-info/scripts/cloudflare-candidate-slot.mjs
+    - telegram-control/**
+    - telegram-qa/**
+    - .dev.vars
+
+acceptance:
+  - >
+    Preflight rejects forks, non-PR events, unexpected repository/base/head
+    identity, wrong merge ref/SHA/parentage, invalid PR metadata and secret-bearing env.
+  - >
+    Preflight runs the locally installed Wrangler CLI with exact dry-run-only
+    staging bundle arguments; never invokes the staging release script,
+    workflow dispatch, Cloudflare API, Telegram API or deployment.
+  - >
+    Wrangler runs with an isolated HOME, XDG_CONFIG_HOME and TMPDIR; local
+    environment files are rejected. The generated bundle is ephemeral and
+    removed after verification; no source or secret values are printed in logs.
+  - >
+    The existing read-only PR CI adds a candidate preflight step for
+    pull_request only; all existing tests and manual deployment gates remain.
+  - >
+    A separate negative TDD test suite proves fail-closed inputs and dry-run
+    command construction. Required repository checks remain unchanged.
+  - >
+    Staging deployment remains NOT_RUN. This preflight must never be presented
+    as STAGING_STATUS: PASS or as approval to merge PR #8.
+  - >
+    Independent Security Reviewer assesses the exact committed tree and its
+    trust boundaries before publication as a Draft PR.
+
+required_checks:
+  - targeted_tests_red_then_green
+  - npm_run_check
+  - npm_test_if_safe
+  - git_diff_check
+  - no_secret_or_deploy_side_effects
+  - independent_security_review
+  - draft_pr_ci_if_available
+
+branch: agent/release-agent/TG-PUBLIC-010-premerge-candidate-gate
+production_access: false
+merge_access: false
+workflow_dispatch_access: false
+secret_access: false
