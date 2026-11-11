@@ -1,0 +1,60 @@
+task_id: TG-PUBLIC-011
+base_sha: 69b5173eacad30550cb0050b3c5aa07a3556d7ae
+owner: release-agent
+reviewer: security-reviewer
+severity: P1
+type: security
+
+triage:
+  symptom: >
+    A local full npm test attempt was stopped after detection of a possible
+    connection to api.telegram.org. Draft PR publication would automatically
+    trigger this same suite in GitHub Actions.
+  expected: >
+    Pull request tests may never contact live Telegram or other external APIs.
+  actual: >
+    Existing isolation CI ran the full test suite without an explicit outbound
+    network boundary.
+  likely_root_cause: Missing negative-network control for Node test execution.
+  affected_flow: Pre-merge Telegram CI validation.
+  risk: Unintended live API operations during seemingly read-only tests.
+
+goal: >
+  Run the full test suite inside an OS-isolated Docker container with no network
+  interface except loopback, and load an offline-only Node network guard as
+  defense in depth. Preserve all existing tests and source release pins.
+
+scope:
+  allowed_paths:
+    - ops/subagents/contracts/TG-PUBLIC-011.yml
+    - .github/qa/ci-offline-network-policy.mjs
+    - .github/qa/ci-offline-network-guard.mjs
+    - .github/qa/ci-offline-network-policy.test.mjs
+    - .github/workflows/standalone-telegram-ci.yml
+  forbidden_paths:
+    - telegram-info/**
+    - .github/workflows/telegram-staging-deploy.yml
+    - .github/workflows/telegram-live-verify.yml
+    - .github/workflows/telegram-webhook-migrate.yml
+    - .github/workflows/telegram-webhook-secret-rotate.yml
+    - ops/public-source-baseline.json
+    - .dev.vars
+
+acceptance:
+  - No real network calls in local verification.
+  - Node built-in fetch, TCP and TLS outbound operations reject non-loopback targets.
+  - Full npm test runs only in a pinned Docker image with --network none,
+    no privileges, read-only repository mount and no secrets or host sockets.
+  - Network guard is preloaded inside the isolated test container.
+  - Docker failure fails CI; there is no fallback execution on the runner host.
+  - Any guard preload failure fails CI; tests may use loopback and offline mocks.
+  - No test is removed, no CI or release gate weakened, no secret or deploy step.
+  - The protected Telegram source tree and four workflow pins remain unchanged.
+  - Separate RED and GREEN safety tests and independent Security Review.
+  - Draft PR publication only after safety approval; no merge/deploy/dispatch.
+
+branch: agent/release-agent/TG-PUBLIC-010-premerge-candidate-gate
+production_access: false
+merge_access: false
+workflow_dispatch_access: false
+secret_access: false
