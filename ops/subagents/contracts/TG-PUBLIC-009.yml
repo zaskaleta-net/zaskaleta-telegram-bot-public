@@ -1,0 +1,87 @@
+task_id: TG-PUBLIC-009
+owner: release-agent
+reviewer: security-reviewer
+severity: P1
+type: security
+
+triage:
+  symptom: >
+    Proposed manual webhook-options repair fails the public forensic gate before
+    any remediation, reporting GUARDED_TREE_CONTEXT_INVALID.
+  expected: >
+    The forensic gate recognizes only the exact reviewed main-branch repair
+    invocation, while still rejecting unreviewed workflows and identities.
+  actual: >
+    publicSourceContext recognizes staging, live-verify and webhook-rotation
+    workflows but not the separately proposed webhook-options repair workflow.
+  likely_root_cause: Missing exact manual context policy for the repair workflow.
+  affected_flow: Future guarded Telegram webhook options repair (not executed).
+  risk: >
+    Unauthorized workflow authorization, weakened immutable workflow checks,
+    stale source tree pins, or inadvertent production access.
+  owner: release-agent
+  reviewer: security-reviewer
+
+goal: >
+  Produce a reviewable Draft PR that extends forensic source verification to
+  the separately proposed webhook-options repair workflow using exact GitHub
+  manual context, two specific approval inputs and immutable workflow template
+  validation, preserving all existing fail-closed contexts and source pins.
+
+scope:
+  allowed_paths:
+    - ops/subagents/contracts/TG-PUBLIC-009.yml
+    - ops/public-source-baseline.json
+    - telegram-info/scripts/telegram-forensic-audit.mjs
+    - telegram-info/test/forensic-tree-context.test.mjs
+    - telegram-info/test/fixtures/telegram-webhook-options-repair.yml
+    - .github/workflows/telegram-staging-deploy.yml
+    - .github/workflows/telegram-live-verify.yml
+    - .github/workflows/telegram-webhook-migrate.yml
+    - .github/workflows/telegram-webhook-secret-rotate.yml
+  forbidden_paths:
+    - .github/workflows/telegram-webhook-options-repair.yml
+    - .github/workflows/telegram-webhook-options-diagnostic.yml
+    - .github/workflows/telegram-webhook-rotate-readonly.yml
+    - telegram-info/src/**
+    - telegram-control/**
+    - telegram-qa/**
+    - wrangler.toml
+    - .dev.vars
+
+acceptance:
+  - >
+    The protected public manual context accepts only main and the exact future
+    workflow identity with BOTH required approval values and valid runner SHA.
+  - >
+    The audit recognizes the repair workflow only if its reviewed normalized
+    immutable template matches, without granting implicit release permission.
+  - >
+    Negative tests reject wrong workflow, missing/mutated approval values,
+    wrong branches/ref/SHA, forged repository and tampered template or pins.
+  - >
+    Existing staging, live-verify, rotation, source PR, legacy and migration
+    forensic tests remain fail-closed and continue to pass.
+  - >
+    Update only the four existing reviewed source tree pins and their Git blob
+    fingerprints in the public baseline; normalized templates remain identical.
+  - >
+    Do not publish the future repair workflow, run it or invoke Telegram API.
+  - >
+    Independent Security Review of exact commit before publication and again
+    after any substantive revisions, with its verdict recorded in Draft PR.
+
+required_checks:
+  - syntax
+  - targeted_tests
+  - npm_run_check
+  - npm_test_if_safe
+  - baseline_immutable_template_verification
+  - independent_security_review
+  - draft_pr_ci_on_push_if_available
+
+branch: agent/release-agent/TG-PUBLIC-009-forensic-repair-guard
+production_access: false
+merge_access: false
+workflow_dispatch_access: false
+secret_access: false

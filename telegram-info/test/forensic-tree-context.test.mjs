@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const AUDIT = path.join(ROOT, 'telegram-info/scripts/telegram-forensic-audit.mjs');
 const WORKFLOW = path.join(ROOT, '.github/workflows/telegram-staging-deploy.yml');
+const REPAIR_FIXTURE = path.join(ROOT, 'telegram-info/test/fixtures/telegram-webhook-options-repair.yml');
 const PIN = /EXPECTED_TELEGRAM_INFO_TREE:\s*([0-9a-f]{40})/u.exec(fs.readFileSync(WORKFLOW, 'utf8'))?.[1];
 assert.match(PIN, /^[0-9a-f]{40}$/u);
 
@@ -73,6 +75,18 @@ if (args[0] === 'show'
   const fromMain = name.startsWith('refs/remotes/origin/main:');
   if (fromMain && mode === 'missing-main') fail();
   const candidate = name.slice(fromMain ? 'refs/remotes/origin/main:'.length : 'HEAD:'.length);
+  if (!fromMain && candidate === '.github/workflows/telegram-webhook-options-repair.yml') {
+    if (mode === 'repair-missing-workflow') fail();
+    let source = fs.readFileSync(path.join(repo,'telegram-info/test/fixtures/telegram-webhook-options-repair.yml'),'utf8');
+    source = source.replace(/EXPECTED_TELEGRAM_INFO_TREE:\s*[0-9a-f]{40}/u,
+      'EXPECTED_TELEGRAM_INFO_TREE: ' + pin);
+    if (mode === 'repair-template-tamper') source = source.replace('drop_pending_updates: false', 'drop_pending_updates: true');
+    if (mode === 'repair-template-approval') source = source.replace("inputs.approval == 'REPAIR-TELEGRAM-WEBHOOK-OPTIONS'", 'true');
+    if (mode === 'repair-extra-pin') source += '\n      EXPECTED_TELEGRAM_INFO_TREE: ' + pin + '\n';
+    if (mode === 'repair-stale-pin') source = source.replace(/EXPECTED_TELEGRAM_INFO_TREE:\s*[0-9a-f]{40}/u,
+      'EXPECTED_TELEGRAM_INFO_TREE: ' + 'e'.repeat(40));
+    process.stdout.write(source); process.exit(0);
+  }
   if (candidate === 'ops/public-source-baseline.json' && publicRun) {
     if (mode === 'missing-baseline' || (fromMain && mode === 'missing-main-baseline')) fail();
     let raw = fromMain && legacyMain ? JSON.stringify(legacyBaseline) : fs.readFileSync(path.join(repo,candidate),'utf8');
@@ -397,3 +411,50 @@ for (const [label,options] of Object.entries({
   agentRef:{env:{GITHUB_REF:'refs/heads/'+BRANCH}},
   workflowPath:{env:{GITHUB_WORKFLOW_REF:PUBLIC_REPO+'/.github/workflows/other.yml@refs/heads/main'}}
 })) test('public rotation rejects '+label,()=>failClosed(rotationManual(options),'GUARDED_TREE_CONTEXT_INVALID'));
+
+function repairManual(options = {}) {
+  return publicManual({workflow:'telegram-webhook-options-repair.yml',...options,mutateEvent:e=>{
+    e.inputs={
+      approval:'REPAIR-TELEGRAM-WEBHOOK-OPTIONS',
+      secret_risk_acknowledgement:'I-ACCEPT-TELEGRAM-SECRET-MAY-CHANGE'
+    };
+    options.mutateEvent?.(e);
+  }});
+}
+test('future repair fixture matches independently pinned reviewed SHA256',()=>{
+  const source=fs.readFileSync(REPAIR_FIXTURE,'utf8');
+  const pins=[...source.matchAll(/^[ \t]*EXPECTED_TELEGRAM_INFO_TREE:[ \t]*([0-9a-f]{40})[ \t]*$/gmu)];
+  assert.equal(pins.length,1);
+  const normalized=source.replace(/^([ \t]*EXPECTED_TELEGRAM_INFO_TREE:[ \t]*)[0-9a-f]{40}([ \t]*)$/mu,
+    '$1<REVIEWED_TREE>$2');
+  // The expected hash is deliberately a literal, not generated from fixture.
+  assert.equal(createHash('sha256').update(normalized).digest('hex'),
+    'c44b75fde7d77b4b214f4d5e30ca4b7c77ec266393045e0a27de6b9c028f0570');
+});
+test('future reviewed manual repair accepts exact context only',()=>{
+  const run=repairManual();pass(run);
+  assert.match(run.stdout,/PUBLIC_PROTECTED_WEBHOOK_OPTIONS_REPAIR_MAIN/u);
+  assert.doesNotMatch(run.stdout,/"forensicContext":"PROTECTED_MAIN"/u);
+});
+for (const [label,options] of Object.entries({
+  missingApproval:{mutateEvent:e=>{delete e.inputs.approval;}},
+  wrongApproval:{mutateEvent:e=>{e.inputs.approval='DEPLOY-TELEGRAM-STAGING';}},
+  missingSecretAcknowledgement:{mutateEvent:e=>{delete e.inputs.secret_risk_acknowledgement;}},
+  wrongSecretAcknowledgement:{mutateEvent:e=>{e.inputs.secret_risk_acknowledgement='ACK';}},
+  missingInputs:{mutateEvent:e=>{delete e.inputs;}},
+  wrongWorkflowRef:{workflow:'telegram-webhook-secret-rotate.yml'},
+  wrongWorkflowPath:{env:{GITHUB_WORKFLOW_REF:PUBLIC_REPO+'/.github/workflows/other.yml@refs/heads/main'}},
+  wrongWorkflowBranch:{env:{GITHUB_WORKFLOW_REF:PUBLIC_REPO+'/.github/workflows/telegram-webhook-options-repair.yml@refs/heads/agent/release-agent/test'}},
+  staleRunnerSha:{env:{GITHUB_WORKFLOW_SHA:BASE}},
+  wrongRef:{env:{GITHUB_REF:'refs/heads/agent/release-agent/test'}},
+  wrongEventRef:{mutateEvent:e=>{e.ref='refs/heads/other';}},
+  wrongRepo:{env:{GITHUB_REPOSITORY:'attacker/fork'}},
+  forgedEventRepo:{mutateEvent:e=>{e.repository.full_name='attacker/fork';}},
+  missingCommit:{mode:'repair-missing-workflow'},
+  tamperedTemplate:{mode:'repair-template-tamper'},
+  weakenedTemplateApproval:{mode:'repair-template-approval'},
+  extraPin:{mode:'repair-extra-pin'},
+  staleTemplatePin:{mode:'repair-stale-pin'}
+})) {
+  test('future repair refuses '+label,()=>failClosed(repairManual(options),'GUARDED_TREE_CONTEXT_INVALID'));
+}

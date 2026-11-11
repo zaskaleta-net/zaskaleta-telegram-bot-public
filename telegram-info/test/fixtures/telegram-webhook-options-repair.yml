@@ -1,0 +1,195 @@
+name: Telegram Webhook Options — Guarded Repair
+
+# TG-PUBLIC-008: manual proposal only. A future dispatch requires separate
+# informed production authorization. Telegram getWebhookInfo never reveals
+# the current Telegram-side secret_token. setWebhook below explicitly sends
+# the GitHub-staged token proven accepted by the live Worker, which MAY
+# REPLACE Telegram's previously stored hidden secret even when probes pass.
+# Never dispatch this workflow as part of PR validation or automated CI.
+on:
+  workflow_dispatch:
+    inputs:
+      approval:
+        description: 'Type REPAIR-TELEGRAM-WEBHOOK-OPTIONS'
+        required: true
+        type: string
+      secret_risk_acknowledgement:
+        description: 'Type I-ACCEPT-TELEGRAM-SECRET-MAY-CHANGE after separate production approval'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-webhook-secret-rotation
+  cancel-in-progress: false
+
+env:
+  EXPECTED_TELEGRAM_INFO_TREE: ebd78c32e9a3ee5dfdd2376569bc3aa598793179
+
+jobs:
+  repair:
+    if: github.repository == 'zaskaleta-net/zaskaleta-telegram-bot-public' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.approval == 'REPAIR-TELEGRAM-WEBHOOK-OPTIONS' && inputs.secret_risk_acknowledgement == 'I-ACCEPT-TELEGRAM-SECRET-MAY-CHANGE'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: telegram-registration
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Enforce approved public main source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test "$(git rev-parse HEAD:telegram-info)" = "$EXPECTED_TELEGRAM_INFO_TREE"
+          # The audit itself logs Git metadata; retain its strict exit gate
+          # while emitting only a fixed status code in this repair workflow.
+          if ! node telegram-info/scripts/telegram-forensic-audit.mjs >/dev/null 2>&1; then
+            echo 'WEBHOOK_OPTIONS_REPAIR_SOURCE_AUDIT_FAILED' >&2
+            exit 1
+          fi
+          echo 'WEBHOOK_OPTIONS_REPAIR_SOURCE_AUDIT_OK'
+      - name: Repair only missing chat_join_request after read-only gates
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          const token = process.env.TELEGRAM_BOT_TOKEN || '';
+          const secret = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+          const webhook = 'https://bot.zaskaleta.net/telegram/stateless';
+          const healthUrl = 'https://bot.zaskaleta.net/health';
+          let stage = 'INPUTS';
+          let setWebhookAttempted = false;
+          const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+          function requireOk(condition) { if (!condition) throw null; }
+
+          async function request(url, options = {}) {
+            const response = await fetch(url, {
+              ...options,
+              redirect: 'error',
+              signal: AbortSignal.timeout(15000)
+            });
+            let body = null;
+            try { body = await response.json(); } catch {}
+            return { status: response.status, body };
+          }
+
+          async function tg(method, options = {}) {
+            const response = await request('https://api.telegram.org/bot' + token + '/' + method, options);
+            requireOk(response.status === 200 && response.body?.ok === true);
+            return response.body.result;
+          }
+
+          function validatedOptions(info) {
+            requireOk(info?.url === webhook && info.has_custom_certificate === false);
+            requireOk(Number.isSafeInteger(info.pending_update_count) && info.pending_update_count >= 0);
+            requireOk(Number.isSafeInteger(info.max_connections) && info.max_connections >= 1 && info.max_connections <= 100);
+            const updates = info.allowed_updates;
+            requireOk(Array.isArray(updates) && updates.length > 0 && updates.length === new Set(updates).size);
+            requireOk(updates.every(value => typeof value === 'string' && /^[a-z_]{1,64}$/.test(value)));
+            requireOk(updates.includes('message') && updates.includes('callback_query'));
+            return { url: info.url, max_connections: info.max_connections, allowed_updates: [...updates] };
+          }
+
+          async function health() {
+            const response = await request(healthUrl, { method: 'GET' });
+            requireOk(response.status === 200 && response.body?.ok === true && response.body?.delivery === true);
+            requireOk(uuid.test(response.body.versionId || ''));
+            return response.body.versionId;
+          }
+
+          async function secretProbe() {
+            // {} has no update_id and is not a real Telegram update. This
+            // confirms the staged secret is accepted by the active Worker;
+            // it cannot reveal or prove Telegram's stored webhook secret.
+            const invalid = await request(webhook, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': 'invalid-options-repair-probe' },
+              body: '{}'
+            });
+            requireOk(invalid.status === 401);
+            const valid = await request(webhook, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': secret },
+              body: '{}'
+            });
+            requireOk(valid.status === 200 && valid.body?.ok === true);
+          }
+
+          try {
+            requireOk(/^[0-9]{5,20}:[A-Za-z0-9_-]{30,256}$/.test(token));
+            requireOk(/^[A-Za-z0-9_-]{32,256}$/.test(secret));
+
+            stage = 'BOT_IDENTITY';
+            const me = await tg('getMe');
+            requireOk(me?.is_bot === true && me.username === 'ZaskaletaInfoBot');
+
+            stage = 'WEBHOOK_OPTIONS';
+            const initial = validatedOptions(await tg('getWebhookInfo'));
+            if (initial.allowed_updates.includes('chat_join_request')) {
+              console.log('WEBHOOK_OPTIONS_REPAIR_NOOP');
+            } else {
+              stage = 'WORKER_HEALTH';
+              const activeVersion = await health();
+
+              stage = 'ACTIVE_WORKER_SECRET';
+              await secretProbe();
+
+              stage = 'UNCHANGED_WEBHOOK_OPTIONS';
+              const before = validatedOptions(await tg('getWebhookInfo'));
+              requireOk(JSON.stringify(before) === JSON.stringify(initial));
+
+              stage = 'UNCHANGED_WORKER';
+              requireOk(await health() === activeVersion);
+              await secretProbe();
+
+              stage = 'FINAL_WEBHOOK_RECHECK';
+              const immediatelyBefore = validatedOptions(await tg('getWebhookInfo'));
+              requireOk(JSON.stringify(immediatelyBefore) === JSON.stringify(initial));
+
+              // setWebhook will preserve these visible options and pending
+              // updates. It MAY replace Telegram's hidden secret_token.
+              const desired = {
+                url: initial.url,
+                max_connections: initial.max_connections,
+                allowed_updates: [...initial.allowed_updates, 'chat_join_request'],
+                secret_token: secret,
+                drop_pending_updates: false
+              };
+              stage = 'SET_WEBHOOK_UNCONFIRMED';
+              setWebhookAttempted = true;
+              requireOk(await tg('setWebhook', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(desired)
+              }) === true);
+
+              stage = 'POST_VERIFY';
+              const after = validatedOptions(await tg('getWebhookInfo'));
+              requireOk(JSON.stringify(after) === JSON.stringify({
+                url: desired.url,
+                max_connections: desired.max_connections,
+                allowed_updates: desired.allowed_updates
+              }));
+              requireOk(await health() === activeVersion);
+              await secretProbe();
+              console.log('WEBHOOK_OPTIONS_REPAIR_OK');
+            }
+          } catch {
+            // Never print raw exception, API result, URL, token, secret,
+            // metadata, hashes or payloads. No automated retry after POST.
+            console.error('WEBHOOK_OPTIONS_REPAIR_FAILED ' + stage);
+            if (setWebhookAttempted) console.error('WEBHOOK_OPTIONS_REPAIR_REVIEW_STATE_BEFORE_RERUN');
+            process.exitCode = 1;
+          }
+          NODE
