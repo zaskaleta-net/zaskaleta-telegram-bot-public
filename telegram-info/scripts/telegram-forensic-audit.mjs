@@ -179,6 +179,12 @@ const PUBLIC_WORKFLOW_TEMPLATES = {
   ".github/workflows/telegram-webhook-migrate.yml": "bb238ef31d04316af7e978b8415074dcf1f1adb3cce1db0eddc68b9d19512740",
   ".github/workflows/telegram-webhook-secret-rotate.yml": "30ae3c55e09ed08c45614fe1d07e3ffad6a7816605b61d320a3c63adf4c676c7"
 };
+// TG-PUBLIC-008 reviewed repair template, retained as an inert test fixture.
+// It is deliberately NOT part of the published/guarded workflow list. A
+// future separately authorized manual workflow must match this exact template
+// (except its single source-tree pin) before receiving forensic context.
+const PUBLIC_REPAIR_WORKFLOW = '.github/workflows/telegram-webhook-options-repair.yml';
+const PUBLIC_REPAIR_TEMPLATE_SHA256 = 'c44b75fde7d77b4b214f4d5e30ca4b7c77ec266393045e0a27de6b9c028f0570';
 const PUBLIC_GUARDED_BLOBS = {
   ".github/workflows/telegram-staging-deploy.yml": "c44c1a53ba9bc2d0066510db01dc517ebe2cdea6",
   ".github/workflows/telegram-live-verify.yml": "f449c6d834fed8275e97c3bac730962b6e345fb3",
@@ -256,6 +262,16 @@ function publicSourceContext() {
           && event.inputs?.approval === 'ROTATE-TELEGRAM-WEBHOOK-SECRET'
           && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(event.inputs?.expected_active_version || '')) {
         return 'PUBLIC_PROTECTED_WEBHOOK_ROTATION_MAIN';
+      }
+      if (process.env.GITHUB_WORKFLOW_REF === prefix + 'telegram-webhook-options-repair.yml@refs/heads/main'
+          && event.inputs?.approval === 'REPAIR-TELEGRAM-WEBHOOK-OPTIONS'
+          && event.inputs?.secret_risk_acknowledgement === 'I-ACCEPT-TELEGRAM-SECRET-MAY-CHANGE') {
+        // HEAD must actually contain the separately reviewed workflow. This
+        // source-only proposal does not publish it or grant dispatch rights.
+        const committedRepair = gitTrusted(['show','HEAD:' + PUBLIC_REPAIR_WORKFLOW]);
+        if (workflowTemplateHash(committedRepair) !== PUBLIC_REPAIR_TEMPLATE_SHA256
+            || singlePin(committedRepair) !== currentTree) return 'INVALID';
+        return 'PUBLIC_PROTECTED_WEBHOOK_OPTIONS_REPAIR_MAIN';
       }
       if (process.env.GITHUB_WORKFLOW_REF === prefix + 'telegram-live-verify.yml@refs/heads/main') {
         return 'PUBLIC_PROTECTED_LIVE_VERIFY_MAIN';
