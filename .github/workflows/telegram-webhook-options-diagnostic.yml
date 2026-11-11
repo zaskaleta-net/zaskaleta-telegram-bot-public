@@ -1,0 +1,83 @@
+name: Telegram Webhook Options — Read-only Diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-webhook-secret-rotation
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    if: github.repository == 'zaskaleta-net/zaskaleta-telegram-bot-public' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    environment: telegram-registration
+    steps:
+      - name: Inspect approved Telegram webhook options without mutation
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          const token = process.env.TELEGRAM_BOT_TOKEN || '';
+
+          function fail(code) {
+            console.error(code);
+            process.exitCode = 1;
+          }
+
+          async function telegramRead(method) {
+            const response = await fetch('https://api.telegram.org/bot' + token + '/' + method, {
+              method: 'GET',
+              redirect: 'error',
+              signal: AbortSignal.timeout(15000)
+            });
+            if (response.status !== 200) throw null;
+            const body = await response.json();
+            if (body?.ok !== true || body.result === null || typeof body.result !== 'object') throw null;
+            return body.result;
+          }
+
+          try {
+            if (!/^[0-9]{5,20}:[A-Za-z0-9_-]{30,256}$/.test(token)) {
+              fail('WEBHOOK_DIAGNOSTIC_TOKEN_UNAVAILABLE');
+            } else {
+              const me = await telegramRead('getMe');
+              if (me.is_bot !== true || me.username !== 'ZaskaletaInfoBot') {
+                fail('WEBHOOK_DIAGNOSTIC_WRONG_BOT');
+              } else {
+                const info = await telegramRead('getWebhookInfo');
+                const updates = info.allowed_updates;
+                const validUpdates = Array.isArray(updates) &&
+                  updates.every(value => typeof value === 'string' && /^[a-z_]{1,64}$/.test(value));
+
+                const checks = {
+                  webhookUrlMatches: info.url === 'https://bot.zaskaleta.net/telegram/stateless',
+                  customCertificateDisabled: info.has_custom_certificate === false,
+                  pendingCountValid: Number.isSafeInteger(info.pending_update_count) && info.pending_update_count >= 0,
+                  maxConnectionsValid: Number.isSafeInteger(info.max_connections) && info.max_connections >= 1 && info.max_connections <= 100,
+                  allowedUpdatesValid: validUpdates,
+                  messageSubscribed: validUpdates && updates.includes('message'),
+                  callbackQuerySubscribed: validUpdates && updates.includes('callback_query'),
+                  chatJoinRequestSubscribed: validUpdates && updates.includes('chat_join_request')
+                };
+
+                // Only fixed keys and boolean results leave this process.
+                console.log('WEBHOOK_OPTIONS_DIAGNOSTIC ' + JSON.stringify(checks));
+                if (Object.values(checks).every(Boolean)) {
+                  console.log('WEBHOOK_OPTIONS_DIAGNOSTIC_OK');
+                } else {
+                  fail('WEBHOOK_OPTIONS_MISMATCH');
+                }
+              }
+            }
+          } catch {
+            // Never print exceptions: they may contain token-bearing URLs or API data.
+            fail('WEBHOOK_DIAGNOSTIC_REQUEST_FAILED');
+          }
+          NODE
